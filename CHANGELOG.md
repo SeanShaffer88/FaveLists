@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.1 — 2026-10-25
+
+Bug-fix release.
+
+- Fixed: on Windows the app now runs in the Windows GUI subsystem, so
+  launching FaveLists no longer opens a console window alongside the
+  GUI. In v0.1.0 the binary was built as a console-subsystem program,
+  so Windows showed a console window next to the app (and closing that
+  console would close the app). No other behaviour changes.
+- Builds are unsigned. Windows GUI behaviour remains **Unverified**
+  until the maintainer's on-machine field test (`docs/FIELD_TEST.md`)
+  is complete.
+
 ## v0.1.0 — 2026-10-25
 
 First release.
