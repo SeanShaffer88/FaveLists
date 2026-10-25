@@ -24,7 +24,9 @@ text / Markdown / cover-image exports. MIT. Local-only.
   data folder. Provider fixtures in `tests/fixtures/` are key-free
   recorded responses.
 - The fixed set is **11 categories** (spec §2). No anime, no software, no
-  user-created categories, no synopses, no personal ratings/notes.
+  user-created categories, no synopses. (Personal ratings/notes were
+  excluded in v1; SEAN reversed that 2026-10-25 — they are supported
+  since v0.2, program item #5.)
 - Public documentation must not name or compare competitor software.
 
 ## Architecture

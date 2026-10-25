@@ -1,0 +1,5 @@
+{"command":"list.create","params":{"name":"Best Sci-Fi","category":"movies","ranked":true},"id":"s1"}
+{"command":"item.add","params":{"list_id":1,"title":"Alien","fields":{"year":"1979","director":"Ridley Scott"},"provider_id":"348","source":"tmdb","added_at":1700000000},"id":"s2"}
+{"command":"item.add","params":{"list_id":1,"title":"Arrival","fields":{"year":"2016","director":"Denis Villeneuve"},"provider_id":"329865","source":"tmdb","added_at":1700000100},"id":"s3"}
+{"command":"item.move","params":{"list_id":1,"from":0,"to":1},"id":"s4"}
+{"command":"list.query","params":{"list_id":1,"query":"ali"},"id":"s5"}

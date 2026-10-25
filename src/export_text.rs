@@ -12,18 +12,40 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The fields to include in a text export, in category order. Built by the
-/// GUI from the checklist (and persisted via Settings), consumed here.
-/// (`FieldDef` holds only `&'static str`, so no lifetime is needed.)
+/// The export pseudo-fields (v0.2 program #5): the per-entry personal
+/// rating and note. They are not category fields — they read from the item
+/// itself — and they always sort AFTER the category fields in the export
+/// checklist and the rendered document.
+pub const PSEUDO_FIELDS: [crate::model::FieldDef; 2] = [
+    crate::model::FieldDef {
+        key: "rating",
+        label: "Rating",
+    },
+    crate::model::FieldDef {
+        key: "note",
+        label: "Note",
+    },
+];
+
+/// Every field an export checklist may offer for this list: the category
+/// fields followed by the pseudo-fields.
+pub fn all_field_defs(list: &FavList) -> Vec<crate::model::FieldDef> {
+    let mut out: Vec<crate::model::FieldDef> = list.category.fields().to_vec();
+    out.extend(PSEUDO_FIELDS);
+    out
+}
+
+/// The fields to include in a text export, in category order with the
+/// pseudo-fields last. Built by the GUI from the checklist (and persisted
+/// via Settings), consumed here. (`FieldDef` holds only `&'static str`, so
+/// no lifetime is needed.)
 pub fn selected_field_defs(
     list: &FavList,
     selected_keys: &[String],
 ) -> Vec<crate::model::FieldDef> {
-    list.category
-        .fields()
-        .iter()
+    all_field_defs(list)
+        .into_iter()
         .filter(|f| selected_keys.iter().any(|k| k == f.key))
-        .copied()
         .collect()
 }
 
@@ -41,8 +63,25 @@ fn item_lines(
         }
     }
     for f in fields {
-        if let Some(v) = item.field(f.key) {
-            lines.push(format!("{}: {}", f.label, v));
+        // Pseudo-fields render from the item, not the field map, and only
+        // when the item actually carries them.
+        match f.key {
+            "rating" => {
+                if let Some(r) = item.rating {
+                    lines.push(format!("Rating: {r}/10"));
+                }
+            }
+            "note" => {
+                let note = item.note.trim();
+                if !note.is_empty() {
+                    lines.push(format!("Note: {note}"));
+                }
+            }
+            _ => {
+                if let Some(v) = item.field(f.key) {
+                    lines.push(format!("{}: {}", f.label, v));
+                }
+            }
         }
     }
     lines
@@ -250,6 +289,34 @@ mod tests {
         // Arrival has no cover -> no image line for it.
         assert_eq!(text.matches("![cover]").count(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rating_and_note_render_only_when_selected_and_present() {
+        let mut list = sample_list(true);
+        list.items[0].rating = Some(8);
+        list.items[0].note = "  Saw it opening night. ".into();
+        let mut keys = all_keys(&list);
+        // Not selected: no trace of either pseudo-field.
+        let text = build_txt(&list, &keys);
+        assert!(!text.contains("Rating:"));
+        assert!(!text.contains("Note:"));
+        keys.push("rating".to_string());
+        keys.push("note".to_string());
+        let text = build_txt(&list, &keys);
+        assert!(text.contains("Rating: 8/10"));
+        assert!(text.contains("Note: Saw it opening night.")); // trimmed
+                                                               // The unrated, noteless second item renders nothing extra.
+        assert_eq!(text.matches("Rating:").count(), 1);
+        assert_eq!(text.matches("Note:").count(), 1);
+        // Pseudo-fields come after the category fields.
+        let pos_director = text.find("Director: Ridley Scott").unwrap();
+        let pos_rating = text.find("Rating: 8/10").unwrap();
+        assert!(pos_director < pos_rating);
+        // Markdown renders them too.
+        let md = build_md(&list, &keys, &|_| None);
+        assert!(md.contains("Rating: 8/10"));
+        assert!(md.contains("Note: Saw it opening night."));
     }
 
     #[test]

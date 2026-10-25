@@ -4,13 +4,21 @@
 //! intent only.
 
 pub mod app;
+pub mod app_bulk;
+pub mod app_share;
 pub mod backup;
+pub mod commands;
+pub mod csv_import;
 pub mod drinks;
+pub mod duplicates;
 pub mod export_text;
+pub mod json_channel;
 pub mod layout;
 pub mod model;
 pub mod providers;
 pub mod render;
+pub mod search;
+pub mod share_card;
 pub mod store;
 
 /// Sent with every HTTP request, per API etiquette (MusicBrainz and Open

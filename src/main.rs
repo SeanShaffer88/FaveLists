@@ -8,6 +8,15 @@
 
 fn main() -> eframe::Result<()> {
     let base_dir = favelists::store::exe_dir();
+    // Headless JSON channel (v0.2 program #1): `--json-channel` speaks
+    // JSON-lines over stdin/stdout through the command registry and never
+    // starts the GUI. See `json_channel` for the protocol.
+    if std::env::args().any(|a| a == "--json-channel") {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let _ = favelists::json_channel::run(&base_dir, stdin.lock(), stdout.lock());
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("FaveLists")

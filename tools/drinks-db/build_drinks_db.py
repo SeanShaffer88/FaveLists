@@ -10,6 +10,13 @@ Pipeline (spec section 6):
 The filter/dedupe rules mirror src/drinks.rs in the app (the Rust side is
 unit-tested; this script has a --selftest with the same expectations).
 
+v0.2 #7 quality pass: flavour extraction derives flavours from product
+names far more often (comma-tail segments + brand-anchored head mining),
+soda-tagged rows with positive energy evidence (an "energy" name token
+or a documented energy brand, see ENERGY_BRANDS) are classified as
+energy drinks, and rows carrying the OFF `caffeine_100g` nutriment gain
+an optional `caffeine_mg_per_100ml` pack field.
+
 Usage:
   python3 build_drinks_db.py <export.csv[.gz]> <out.json> [--version N]
   python3 build_drinks_db.py --selftest
@@ -20,12 +27,11 @@ CC BY-SA. Keep the attribution in the output pack's "source" field.
 import csv
 import gzip
 import json
+import math
 import re
 import sys
 
 csv.field_size_limit(64 * 1024 * 1024)
-
-GENERICS = ["energy drink", "energy", "soda", "drink", "beverage"]
 
 
 def normalise(s: str) -> str:
@@ -33,35 +39,177 @@ def normalise(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# --- Flavour extraction (v0.2 #7) -------------------------------------------
+# Mirrors favelists::drinks::parse_flavor exactly; the --selftest below
+# and the Rust unit tests run the SAME vector table.
+
+# Descriptor phrases stripped during extraction, longest first wherever
+# one phrase contains another ("energy drink" before "energy",
+# "flavoured" before "flavour"). Keep in sync with the Rust twin.
+FLAVOR_DESCRIPTORS = [
+    "regular strength", "extra strength", "caffeine free", "energy drink",
+    "zero calorie", "calorie free", "energy shot", "low calorie",
+    "zero sugar", "sugar free", "soft drink", "carbonated", "naturally", "sparkling",
+    "beverage", "flavored", "flavoured", "premium", "energy", "flavor",
+    "flavour", "drink", "soda", "diet", "mix",
+]
+
+SIZE_UNITS = {
+    "fl", "oz", "ml", "cl", "l", "g", "kg", "pack", "pk", "ct", "count",
+    "liter", "liters", "litre", "litres",
+}
+FUSED_SIZE = re.compile(r"^(\d+(?:\.\d+)?)(floz|oz|ml|cl|l|g|kg)$")
+PACK_SIZE = re.compile(r"^(\d+(?:\.\d+)?)-(pack|pk|ct)$")
+BARE_NUMBER = re.compile(r"^\d+(\.\d+)?$")
+TOKEN = re.compile(r"[^\W_]+")
+
+
+def _remove_phrase_ci(text: str, phrase: str) -> str:
+    out = []
+    i, n, m = 0, len(text), len(phrase)
+    if m == 0 or n < m:
+        return text
+    while i < n:
+        if (
+            text[i : i + m].lower() == phrase
+            and (i == 0 or not text[i - 1].isalnum())
+            and (i + m >= n or not text[i + m].isalnum())
+        ):
+            i += m
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _strip_size_tokens(segment: str) -> str:
+    toks = segment.split()
+    out = []
+    i = 0
+    while i < len(toks):
+        low = toks[i].lower().strip(",;-·|/")
+        if FUSED_SIZE.match(low) or PACK_SIZE.match(low):
+            i += 1
+            continue
+        if BARE_NUMBER.match(low):
+            nxt = toks[i + 1].lower().strip(",;-·|/") if i + 1 < len(toks) else ""
+            nxt2 = toks[i + 2].lower().strip(",;-·|/") if i + 2 < len(toks) else ""
+            if nxt == "fl" and nxt2 == "oz":
+                i += 3
+                continue
+            if nxt in SIZE_UNITS:
+                i += 2
+                continue
+        out.append(toks[i])
+        i += 1
+    return " ".join(out)
+
+
+def _clean_flavor_text(segment: str) -> str:
+    s = segment.replace("-", " ").replace("·", " ").replace("|", " ")
+    s = _strip_size_tokens(s)
+    for _ in range(2):
+        for phrase in FLAVOR_DESCRIPTORS:
+            s = _remove_phrase_ci(s, phrase)
+    s = _strip_size_tokens(s)
+    return " ".join(s.split()).strip(" ,;")
+
+
+def _strip_leading_brand_tokens(seg: str, brand: str):
+    brand_tokens = {t.lower() for t in TOKEN.findall(brand)}
+    if not brand_tokens:
+        return seg, False
+    end = 0
+    count = 0
+    for m in TOKEN.finditer(seg):
+        if m.group(0).lower() in brand_tokens:
+            end = m.end()
+            count += 1
+        else:
+            break
+    if count == 0:
+        return seg, False
+    return seg[end:], True
+
+
+def _title_case(s: str) -> str:
+    def part(p: str) -> str:
+        return p[:1].upper() + p[1:].lower() if p else p
+
+    return " ".join("-".join(part(p) for p in w.split("-")) for w in s.split(" "))
+
+
 def parse_flavor(name: str, brand: str) -> str:
-    """Mirror of favelists::drinks::parse_flavor."""
+    """Mirror of favelists::drinks::parse_flavor (v0.2 #7 algorithm).
+
+    Comma segments: the flavour is the last tail segment (after the
+    first) that survives cleaning; otherwise the first segment is mined
+    when a brand anchor exists (brand substring, or leading brand
+    tokens). Cleaning strips size tokens and descriptor phrases.
+    Nothing is invented: no rule firing means an empty flavour.
+    """
     rest = name.strip()
+    brand_found = False
     if brand:
         idx = rest.lower().find(brand.lower())
         if idx >= 0:
-            rest = (rest[:idx] + rest[idx + len(brand):]).strip()
-    if normalise(rest) == normalise(name):
+            rest = rest[:idx] + rest[idx + len(brand):]
+            brand_found = True
+    segments = [s.strip() for s in rest.split(",")]
+    segments = [s for s in segments if s]
+    if not segments:
         return ""
-    changed = True
-    while changed:
-        changed = False
-        lower = rest.lower()
-        for g in GENERICS:
-            if lower == g:
-                rest = ""
-                changed = True
-                break
-            if lower.endswith(g):
-                stripped = lower[: -len(g)]
-                if stripped.endswith((" ", "-")):
-                    rest = rest[: len(stripped.rstrip())].strip()
-                    changed = True
-                    break
-        trimmed = rest.strip("-· ")
-        if trimmed != rest:
-            rest = trimmed
-            changed = True
-    return rest
+    tail = [c for c in (_clean_flavor_text(s) for s in segments[1:]) if c]
+    if tail:
+        result = tail[-1]
+    else:
+        seg, stripped = _strip_leading_brand_tokens(segments[0], brand)
+        if not brand_found and not stripped:
+            return ""
+        result = _clean_flavor_text(seg)
+    if not result or normalise(result) == normalise(name):
+        return ""
+    return _title_case(result)
+
+
+# --- Classification evidence (v0.2 #7) ---------------------------------------
+# Documented energy-drink brands (normalised), used as positive evidence.
+# Derived 2026-10-25 from the bundled pack itself (brands whose entries
+# were >=90% energy drinks across >=3 entries) plus the canonical energy
+# brands whose OFF rows sit under longer company strings. Glaceau and
+# Powerade were excluded on judgement (primarily vitamin/sports-drink
+# brands). Keep in sync with the Rust twin.
+ENERGY_BRANDS = {
+    "1st phorm", "3d energy", "5 hour energy", "alani", "alani nu",
+    "applied nutrition", "arizona super lxr", "bang", "bang energy",
+    "bucked up energy", "bum", "c4", "celcius", "celsius", "clean cause",
+    "fitaid", "flrt", "full throttle", "gfuel", "ghost", "gorilla mind",
+    "gorgie", "jocko", "lotus", "monster energy", "nos", "oca",
+    "optimum nutrition", "proper wild", "prox", "red bull", "reign",
+    "rockstar", "vivee", "zoa",
+}
+
+
+def has_energy_evidence(name: str, brand: str) -> bool:
+    """Mirror of favelists::drinks::has_energy_evidence."""
+    if "energy" in TOKEN.findall(name.lower()):
+        return True
+    return normalise(brand) in ENERGY_BRANDS
+
+
+def caffeine_mg_per_100ml(caffeine_100g):
+    """Mirror of favelists::drinks::caffeine_mg_per_100ml.
+
+    OFF reports caffeine in grams per 100 g; drinks are ~1 g/ml, so
+    x1000 gives mg per 100 ml. Implausible values are dropped; the
+    result is rounded to one decimal (half away from zero, like Rust).
+    """
+    if caffeine_100g is None:
+        return None
+    mg = caffeine_100g * 1000.0
+    if not (1.0 <= mg <= 400.0):
+        return None
+    return math.floor(mg * 10.0 + 0.5) / 10.0
 
 
 def filter_row(row: dict):
@@ -77,22 +225,33 @@ def filter_row(row: dict):
     countries = (row.get("countries_tags") or "").lower()
     if "en:united-states" not in countries:
         return None
+    brand = (row.get("brands") or "").split(",")[0].strip()
     cats = (row.get("categories_tags") or "").lower()
     if "en:energy-drinks" in cats:
         kind = "EnergyDrink"
     elif "en:sodas" in cats:
-        kind = "Soda"
+        # v0.2 #7: OFF tags stay primary, but a soda-tagged row with
+        # positive energy evidence in its name/brand is an energy drink.
+        kind = "EnergyDrink" if has_energy_evidence(name, brand) else "Soda"
     else:
         return None
-    brand = (row.get("brands") or "").split(",")[0].strip()
     image = (row.get("image_front_url") or row.get("image_url") or "").strip()
-    return {
+    entry = {
         "name": name,
         "brand": brand,
         "flavor": parse_flavor(name, brand),
         "kind": kind,
         "image_url": image or None,
     }
+    caffeine_raw = (row.get("caffeine_100g") or "").strip()
+    try:
+        caffeine_g = float(caffeine_raw) if caffeine_raw else None
+    except ValueError:
+        caffeine_g = None
+    caffeine = caffeine_mg_per_100ml(caffeine_g)
+    if caffeine is not None:
+        entry["caffeine_mg_per_100ml"] = caffeine
+    return entry
 
 
 def brands_compatible(a: str, b: str) -> bool:
@@ -114,6 +273,8 @@ def dedupe(entries):
             i = seen[key]
             if not out[i]["image_url"] and e["image_url"]:
                 out[i]["image_url"] = e["image_url"]
+            if "caffeine_mg_per_100ml" not in out[i] and "caffeine_mg_per_100ml" in e:
+                out[i]["caffeine_mg_per_100ml"] = e["caffeine_mg_per_100ml"]
         else:
             seen[key] = len(out)
             out.append(e)
@@ -135,6 +296,8 @@ def dedupe(entries):
         else:
             if not match["image_url"] and e["image_url"]:
                 match["image_url"] = e["image_url"]
+            if "caffeine_mg_per_100ml" not in match and "caffeine_mg_per_100ml" in e:
+                match["caffeine_mg_per_100ml"] = e["caffeine_mg_per_100ml"]
             if e["brand"] and len(e["brand"]) < len(match["brand"]):
                 match["brand"] = e["brand"]
     return result
@@ -169,14 +332,66 @@ def selftest() -> int:
     }
     e = filter_row(base)
     assert e and e["kind"] == "Soda" and e["brand"] == "Coca-Cola" and e["flavor"] == "Classic", e
+    assert "caffeine_mg_per_100ml" not in e, e
     assert filter_row({**base, "countries_tags": "en:france"}) is None
     assert filter_row({**base, "lang": "fr"}) is None
     assert filter_row({**base, "categories_tags": "en:chips"}) is None
-    assert parse_flavor("Fanta Orange Soda", "Fanta") == "Orange"
-    assert parse_flavor("Pepsi", "Pepsi") == ""
+    # Flavour vectors — the SAME table runs in the Rust unit tests
+    # (src/drinks.rs flavor_extraction_vectors_match_python_twin).
+    vectors = [
+        ("Coca-Cola Classic", "Coca-Cola", "Classic"),
+        ("Pepsi", "Pepsi", ""),
+        ("Pepsi", "Pepsi-Cola", ""),
+        ("Ghost Energy Drink", "Ghost", ""),
+        ("Fanta Orange Soda", "Fanta", "Orange"),
+        ("!Ajua!, Caffeine Free Soda, Mandarin Orange", "!Ajua!", "Mandarin Orange"),
+        ("1 Liter Pepsi", "Pepsi", ""),
+        ("3D Citrus Mist Energy Drink", "3D Energy", "Citrus Mist"),
+        ("5-hour Energy Regular Strength Berry 1.93oz", "5-hour Energy", "Berry"),
+        ("5-hour ENERGY Extra Strength Hawaiian Breeze", "5-hour ENERGY", "Hawaiian Breeze"),
+        ("Bang Peach Mango", "bang energy", "Peach Mango"),
+        ("Bang sour heads", "Bang", "Sour Heads"),
+        ("Amazon Energy", "Sambazon", ""),
+        ("51 Fifty, Energy Drink, Fruit Punch", "51 Fifty Energy", "Fruit Punch"),
+        ("Amp energy, mixed berry energy drink", "", "Mixed Berry"),
+        ("Coca-Cola Cherry", "The Coca-Cola Company", "Cherry"),
+        ("ACTIVE Essential Amino Acid Blend", "OPTAVIA", ""),
+        ("Monster Energy Ultra Sunrise", "Monster Energy", "Ultra Sunrise"),
+        ("Monster Energy Ultra Sunrise 16 fl oz", "Monster Energy", "Ultra Sunrise"),
+        ("51 Fifty, Sugar Free Energy Drink", "51 Fifty Energy", ""),
+        ("Dr Pepper Zero Sugar", "Dr Pepper", ""),
+        ("Fanta Orange 12 fl oz", "", ""),
+        ("Fanta, Orange", "", "Orange"),
+        ("Ahold, diet root beer", "Ahold", "Root Beer"),
+        ("A' siciliana, sicily blood orange soda", "A' Siciliana", "Sicily Blood Orange"),
+        ("Diet Coke", "Coca-Cola", ""),
+        ("Coca-Cola, Cherry Zero Sugar, 12 pack", "Coca-Cola", "Cherry"),
+        ("Gatorade Frost Glacier Freeze", "Gatorade", "Frost Glacier Freeze"),
+        ("7up, caffeine free naturally flavored soda", "", ""),
+        ("2 Gingers, Premium Ginger Ale", "Polar Corporation", "Ginger Ale"),
+    ]
+    for name, brand, want in vectors:
+        got = parse_flavor(name, brand)
+        assert got == want, f"flavour of {name!r} (brand {brand!r}): got {got!r}, want {want!r}"
+    # Classification: soda tag + positive evidence -> energy drink.
+    by_name = filter_row({**base, "product_name": "Amazon Energy", "brands": "Sambazon"})
+    assert by_name and by_name["kind"] == "EnergyDrink", by_name
+    by_brand = filter_row({**base, "product_name": "Bang Peach Mango", "brands": "bang energy"})
+    assert by_brand and by_brand["kind"] == "EnergyDrink", by_brand
+    assert filter_row(base)["kind"] == "Soda"
+    tagged = filter_row({**base, "product_name": "Mystery Drink", "brands": "Generic",
+                         "categories_tags": "en:beverages,en:energy-drinks"})
+    assert tagged and tagged["kind"] == "EnergyDrink", tagged
+    # Caffeine: g/100g -> mg/100ml, plausibility window, absent otherwise.
+    assert caffeine_mg_per_100ml(0.032) == 32.0
+    assert caffeine_mg_per_100ml(0.0315) == 31.5
+    assert caffeine_mg_per_100ml(0.0) is None
+    assert caffeine_mg_per_100ml(2.5) is None
+    with_caf = filter_row({**base, "caffeine_100g": "0.032"})
+    assert with_caf and with_caf["caffeine_mg_per_100ml"] == 32.0, with_caf
     merged = dedupe([e, {**e, "image_url": None}, {**e, "name": "Other"}])
     assert len(merged) == 2 and merged[0]["image_url"], merged
-    print("selftest OK")
+    print(f"selftest OK ({len(vectors)} flavour vectors)")
     return 0
 
 

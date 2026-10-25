@@ -10,6 +10,10 @@ use crate::model::{normalise_title, Category};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Artist image fallback chain (Deezer → Wikipedia) for the Artists/Bands
+/// category, whose provider carries no photos (v0.2 program #6).
+pub mod artist_image;
+
 /// One auto-fill suggestion: everything the dropdown shows (thumbnail, title,
 /// year, distinguishing line) plus the fields/thumbnail to use when the user
 /// picks it.
@@ -370,7 +374,9 @@ pub fn parse_musicbrainz_artists(text: &str) -> Vec<Suggestion> {
             }
         }
         // Artist photos are best-effort (spec §2): MusicBrainz carries none,
-        // so no thumb/cover here — the UI offers upload after adding.
+        // so no thumb/cover here — at add time the GUI tries the
+        // `artist_image` fallback chain (Deezer → Wikipedia), and manual
+        // upload remains available after adding.
         out.push(s);
     }
     out

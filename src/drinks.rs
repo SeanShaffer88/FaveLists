@@ -44,6 +44,13 @@ pub struct DrinkEntry {
     pub kind: DrinkKind,
     #[serde(default)]
     pub image_url: Option<String>,
+    /// Caffeine content in mg per 100 ml, when the OFF export carried a
+    /// caffeine nutriment for this product (v0.2 #7). Absent on older
+    /// packs and on products with no caffeine data — `serde(default)`
+    /// keeps old packs loading, `skip_serializing_if` keeps new packs
+    /// from growing a null on every entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caffeine_mg_per_100ml: Option<f64>,
 }
 
 impl DrinkEntry {
@@ -66,6 +73,18 @@ impl DrinkEntry {
             (true, false) => self.flavor.clone(),
             (true, true) => String::new(),
         }
+    }
+
+    /// Short caffeine label ("32 mg/100ml", "31.5 mg/100ml") for display
+    /// and for the `caffeine` field set when a drink is added (v0.2 #7).
+    pub fn caffeine_label(&self) -> Option<String> {
+        self.caffeine_mg_per_100ml.map(|mg| {
+            if mg.fract() == 0.0 {
+                format!("{} mg/100ml", mg as i64)
+            } else {
+                format!("{mg:.1} mg/100ml")
+            }
+        })
     }
 }
 
@@ -149,6 +168,9 @@ pub struct RawProduct {
     pub countries_tags: Vec<String>,
     pub lang: String,
     pub image_url: Option<String>,
+    /// The OFF export's `caffeine_100g` nutriment column (grams per
+    /// 100 g), when the row carries it (v0.2 #7).
+    pub caffeine_100g: Option<f64>,
 }
 
 /// Decide whether a raw OFF product belongs in the drinks DB, and convert it.
@@ -171,6 +193,18 @@ pub fn filter_product(raw: &RawProduct) -> Option<DrinkEntry> {
     if !is_us {
         return None;
     }
+    // OFF brands are often a comma list ("Coca-Cola, The Coca-Cola Company");
+    // the first is the consumer-facing brand.
+    let brand = raw
+        .brands
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // Classification (v0.2 #7): the OFF category tags are preferred, but a
+    // soda-tagged row with positive energy evidence in its name/brand is
+    // an energy drink — OFF cross-tags a few hundred of them.
     let kind = if raw
         .categories_tags
         .iter()
@@ -182,19 +216,14 @@ pub fn filter_product(raw: &RawProduct) -> Option<DrinkEntry> {
         .iter()
         .any(|t| t.eq_ignore_ascii_case(DrinkKind::Soda.off_category_tag()))
     {
-        DrinkKind::Soda
+        if has_energy_evidence(name, &brand) {
+            DrinkKind::EnergyDrink
+        } else {
+            DrinkKind::Soda
+        }
     } else {
         return None;
     };
-    // OFF brands are often a comma list ("Coca-Cola, The Coca-Cola Company");
-    // the first is the consumer-facing brand.
-    let brand = raw
-        .brands
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
     let flavor = parse_flavor(name, &brand);
     Some(DrinkEntry {
         name: name.to_string(),
@@ -202,57 +231,409 @@ pub fn filter_product(raw: &RawProduct) -> Option<DrinkEntry> {
         flavor,
         kind,
         image_url: raw.image_url.clone().filter(|u| !u.trim().is_empty()),
+        caffeine_mg_per_100ml: raw.caffeine_100g.and_then(caffeine_mg_per_100ml),
     })
 }
 
-/// Best-effort flavor: the product name with the brand and generic product
-/// words removed. "Coca-Cola Classic" (brand "Coca-Cola") -> "Classic";
-/// "Monster Energy Ultra Sunrise" -> "Ultra Sunrise" is beyond a heuristic,
-/// so there the remainder after the brand is kept whole.
+/// Convert the OFF `caffeine_100g` nutriment (grams per 100 g) to mg per
+/// 100 ml (v0.2 #7). Drinks are ~1 g/ml, so g/100 g × 1000 ≈ mg/100 ml.
+/// Implausible values (data-entry errors do happen) are dropped, and the
+/// result is rounded to one decimal.
+pub fn caffeine_mg_per_100ml(caffeine_100g: f64) -> Option<f64> {
+    let mg = caffeine_100g * 1000.0;
+    if !(1.0..=400.0).contains(&mg) {
+        return None;
+    }
+    Some((mg * 10.0).round() / 10.0)
+}
+
+/// Documented energy-drink brands (normalised: lower-case, punctuation
+/// collapsed — see `normalise_title`), used as positive classification
+/// evidence in [`has_energy_evidence`] (v0.2 #7). Derived 2026-10-25 from
+/// the bundled pack itself (brands whose entries were ≥90% energy drinks
+/// across ≥3 entries), plus the canonical energy brands whose OFF rows
+/// sit under longer company strings. Glaceau and Powerade were excluded
+/// on judgement: both are primarily vitamin/sports-drink brands. The
+/// Python generator mirrors this list exactly.
+pub const ENERGY_BRANDS: &[&str] = &[
+    "1st phorm",
+    "3d energy",
+    "5 hour energy",
+    "alani",
+    "alani nu",
+    "applied nutrition",
+    "arizona super lxr",
+    "bang",
+    "bang energy",
+    "bucked up energy",
+    "bum",
+    "c4",
+    "celcius",
+    "celsius",
+    "clean cause",
+    "fitaid",
+    "flrt",
+    "full throttle",
+    "gfuel",
+    "ghost",
+    "gorilla mind",
+    "gorgie",
+    "jocko",
+    "lotus",
+    "monster energy",
+    "nos",
+    "oca",
+    "optimum nutrition",
+    "proper wild",
+    "prox",
+    "red bull",
+    "reign",
+    "rockstar",
+    "vivee",
+    "zoa",
+];
+
+/// Positive evidence that a product is an energy drink (v0.2 #7): the
+/// word "energy" among the name's tokens, or a brand on the documented
+/// [`ENERGY_BRANDS`] list. Absence of evidence never reclassifies
+/// anything (plenty of real energy drinks carry neither marker).
+pub fn has_energy_evidence(name: &str, brand: &str) -> bool {
+    if word_tokens(name).iter().any(|t| t == "energy") {
+        return true;
+    }
+    ENERGY_BRANDS.contains(&normalise_title(brand).as_str())
+}
+
+/// The alphanumeric word tokens of a string, lower-cased.
+fn word_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            cur.extend(ch.to_lowercase());
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Descriptor phrases stripped during flavour extraction, longest first
+/// wherever one phrase contains another ("energy drink" before "energy",
+/// "flavoured" before "flavour"). The Python generator mirrors this list
+/// exactly — the two are kept in agreement by shared test vectors.
+const FLAVOR_DESCRIPTORS: &[&str] = &[
+    "regular strength",
+    "extra strength",
+    "caffeine free",
+    "energy drink",
+    "zero calorie",
+    "calorie free",
+    "energy shot",
+    "low calorie",
+    "zero sugar",
+    "sugar free",
+    "soft drink",
+    "carbonated",
+    "naturally",
+    "sparkling",
+    "beverage",
+    "flavored",
+    "flavoured",
+    "premium",
+    "energy",
+    "flavor",
+    "flavour",
+    "drink",
+    "soda",
+    "diet",
+    "mix",
+];
+
+/// Unit words that can follow a quantity in a size token ("12 fl oz",
+/// "1 liter", "24 pack").
+const SIZE_UNITS: &[&str] = &[
+    "fl", "oz", "ml", "cl", "l", "g", "kg", "pack", "pk", "ct", "count", "liter", "liters",
+    "litre", "litres",
+];
+
+/// Best-effort flavour extraction from a product name (v0.2 #7 — a rewrite
+/// of the original brand-strip heuristic, which bailed out whenever the
+/// recorded brand was not a substring of the name; OFF's `brands` field
+/// is usually the manufacturer, so that was most rows).
+///
+/// The name is split into comma segments. OFF names are typically
+/// "Product, descriptors…, flavour", so the flavour is the last segment
+/// after the first that still has content once size tokens ("1.93oz",
+/// "12 fl oz") and descriptor phrases ("Zero Sugar", "Energy Drink",
+/// "Diet") are stripped. With no usable tail segment, the first segment
+/// is mined instead — but only with a brand anchor: the brand as a
+/// substring, or leading name tokens that are brand tokens. Nothing is
+/// ever invented: when no rule fires, the flavour stays empty.
 pub fn parse_flavor(name: &str, brand: &str) -> String {
     let mut rest = name.trim().to_string();
+    let mut brand_found = false;
     if !brand.is_empty() {
-        if let Some(idx) = rest.to_lowercase().find(&brand.to_lowercase()) {
-            rest = format!("{}{}", &rest[..idx], &rest[idx + brand.len()..])
-                .trim()
-                .to_string();
+        if let Some(idx) = find_ci(&rest, brand) {
+            rest = format!("{}{}", &rest[..idx], &rest[idx + brand.len()..]);
+            brand_found = true;
         }
     }
-    // A "flavor" that just repeats the whole product name is meaningless
-    // (happens when the recorded brand is a variant the strip missed,
-    // e.g. name "Pepsi" with brand "Pepsi-Cola").
-    if normalise_title(&rest) == normalise_title(name) {
+    let segments: Vec<&str> = rest
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
         return String::new();
     }
-    // Drop leftover separators and generic words at the edges.
-    let generics = ["energy drink", "energy", "soda", "drink", "beverage"];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let lower = rest.to_lowercase();
-        for g in generics {
-            if lower == g {
-                rest.clear();
-                changed = true;
-                break;
-            }
-            if let Some(stripped) = lower.strip_suffix(g) {
-                if stripped.ends_with(' ') || stripped.ends_with('-') {
-                    rest = rest[..stripped.trim_end().len()].trim().to_string();
-                    changed = true;
-                    break;
-                }
-            }
+    let tail_clean: Vec<String> = segments[1..]
+        .iter()
+        .map(|s| clean_flavor_text(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let result = if let Some(last) = tail_clean.last() {
+        last.clone()
+    } else {
+        let (seg2, stripped) = strip_leading_brand_tokens(segments[0], brand);
+        if !brand_found && !stripped {
+            return String::new();
         }
-        let trimmed = rest
-            .trim_matches(|c: char| c == '-' || c == '·' || c == ' ')
-            .to_string();
-        if trimmed != rest {
-            rest = trimmed;
-            changed = true;
+        clean_flavor_text(&seg2)
+    };
+    if result.is_empty() || normalise_title(&result) == normalise_title(name) {
+        return String::new();
+    }
+    title_case(&result)
+}
+
+/// Byte index of the first case-insensitive occurrence of `needle` in
+/// `haystack` (both compared per-char lower-cased; the index is a char
+/// boundary of the original string).
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() {
+        return None;
+    }
+    let h: Vec<(usize, char)> = haystack.char_indices().collect();
+    if h.len() < n.len() {
+        return None;
+    }
+    for w in 0..=(h.len() - n.len()) {
+        let hit = (0..n.len()).all(|k| h[w + k].1.to_lowercase().eq(n[k].to_lowercase()));
+        if hit {
+            return Some(h[w].0);
         }
     }
-    rest
+    None
+}
+
+/// Strip size tokens and descriptor phrases from one name segment:
+/// "-"/"·"/"|" become spaces, sizes go first, descriptors are removed
+/// (two passes — removing one phrase can expose another), sizes again,
+/// then whitespace is collapsed and edge separators trimmed.
+fn clean_flavor_text(segment: &str) -> String {
+    let s: String = segment
+        .chars()
+        .map(|c| {
+            if c == '-' || c == '·' || c == '|' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let s = strip_size_tokens(&s);
+    let mut s = s;
+    for _ in 0..2 {
+        for phrase in FLAVOR_DESCRIPTORS {
+            s = remove_phrase_ci(&s, phrase);
+        }
+    }
+    let s = strip_size_tokens(&s);
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c| c == ' ' || c == ',' || c == ';')
+        .to_string()
+}
+
+/// Remove every word-boundary-delimited, case-insensitive occurrence of
+/// `phrase` from `text` (boundaries = non-alphanumeric or string edge).
+fn remove_phrase_ci(text: &str, phrase: &str) -> String {
+    let hay: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = phrase.chars().collect();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return text.to_string();
+    }
+    let mut out: Vec<char> = Vec::with_capacity(hay.len());
+    let mut i = 0;
+    while i < hay.len() {
+        let matches = i + needle.len() <= hay.len()
+            && (0..needle.len()).all(|k| hay[i + k].to_lowercase().eq(needle[k].to_lowercase()));
+        if matches {
+            let before_ok = i == 0 || !hay[i - 1].is_alphanumeric();
+            let after = i + needle.len();
+            let after_ok = after >= hay.len() || !hay[after].is_alphanumeric();
+            if before_ok && after_ok {
+                i = after;
+                continue;
+            }
+        }
+        out.push(hay[i]);
+        i += 1;
+    }
+    out.into_iter().collect()
+}
+
+/// Is this token (already lower-cased, edge separators stripped) a fused
+/// quantity+unit like "1.93oz", "500ml", "12-pack"?
+fn is_fused_size(tok: &str) -> bool {
+    // Split into the leading numeric part and the trailing unit part.
+    let bytes = tok.as_bytes();
+    let mut i = 0;
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            seen_digit = true;
+            i += 1;
+        } else if b == b'.' && !seen_dot {
+            seen_dot = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if !seen_digit || i == 0 {
+        return false;
+    }
+    let unit = &tok[i..];
+    if let Some(u) = unit.strip_prefix('-') {
+        return matches!(u, "pack" | "pk" | "ct");
+    }
+    matches!(unit, "floz" | "oz" | "ml" | "cl" | "l" | "g" | "kg")
+}
+
+/// Is this token a bare quantity like "12" or "1.93" (`^\d+(\.\d+)?$`,
+/// exactly as the Python generator's regex)?
+fn is_bare_number(tok: &str) -> bool {
+    let mut parts = tok.split('.');
+    let first = parts.next().unwrap_or("");
+    if first.is_empty() || !first.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(rest) => {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) && parts.next().is_none()
+        }
+    }
+}
+
+/// Drop size tokens from a whitespace-tokenised segment: fused forms
+/// ("1.93oz") and quantity+unit pairs ("12 fl oz", "1 liter", "24 pack").
+fn strip_size_tokens(segment: &str) -> String {
+    let toks: Vec<&str> = segment.split_whitespace().collect();
+    let lows: Vec<String> = toks
+        .iter()
+        .map(|t| {
+            t.to_lowercase()
+                .trim_matches(|c| matches!(c, ',' | ';' | '-' | '·' | '|' | '/'))
+                .to_string()
+        })
+        .collect();
+    let mut out: Vec<&str> = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        let l = &lows[i];
+        if is_fused_size(l) {
+            i += 1;
+            continue;
+        }
+        if is_bare_number(l) {
+            let next = lows.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+            if next == "fl" && lows.get(i + 2).map(|s| s.as_str()) == Some("oz") {
+                i += 3;
+                continue;
+            }
+            if SIZE_UNITS.contains(&next) {
+                i += 2;
+                continue;
+            }
+        }
+        out.push(toks[i]);
+        i += 1;
+    }
+    out.join(" ")
+}
+
+/// Remove leading words of `seg` that are brand tokens ("Bang" from brand
+/// "bang energy" in "Bang Peach Mango"). Returns the remainder and
+/// whether anything was stripped.
+fn strip_leading_brand_tokens(seg: &str, brand: &str) -> (String, bool) {
+    let brand_tokens = word_tokens(brand);
+    if brand_tokens.is_empty() {
+        return (seg.to_string(), false);
+    }
+    // Alphanumeric runs of seg, with byte spans.
+    let mut runs: Vec<(usize, usize, String)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in seg.char_indices() {
+        if ch.is_alphanumeric() {
+            if start.is_none() {
+                start = Some(idx);
+            }
+        } else if let Some(s) = start.take() {
+            runs.push((s, idx, seg[s..idx].to_lowercase()));
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, seg.len(), seg[s..].to_lowercase()));
+    }
+    let mut end = 0;
+    let mut count = 0;
+    for (_, e, tok) in &runs {
+        if brand_tokens.contains(tok) {
+            end = *e;
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    if count == 0 {
+        (seg.to_string(), false)
+    } else {
+        (seg[end..].to_string(), true)
+    }
+}
+
+/// Title-case a flavour phrase: per hyphen-part, first char upper, the
+/// rest lower ("sicily blood orange" -> "Sicily Blood Orange").
+fn title_case(s: &str) -> String {
+    s.split(' ')
+        .map(|word| {
+            word.split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => {
+                            let mut out: String = first.to_uppercase().collect();
+                            out.extend(chars.flat_map(|c| c.to_lowercase()));
+                            out
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Dedupe entries by [`DrinkEntry::dedupe_key`], keeping the first entry
@@ -271,6 +652,9 @@ pub fn dedupe(entries: Vec<DrinkEntry>) -> Vec<DrinkEntry> {
             Some(&i) => {
                 if out[i].image_url.is_none() && e.image_url.is_some() {
                     out[i].image_url = e.image_url;
+                }
+                if out[i].caffeine_mg_per_100ml.is_none() && e.caffeine_mg_per_100ml.is_some() {
+                    out[i].caffeine_mg_per_100ml = e.caffeine_mg_per_100ml;
                 }
             }
             None => {
@@ -296,6 +680,11 @@ pub fn dedupe(entries: Vec<DrinkEntry>) -> Vec<DrinkEntry> {
                 if brands_compatible(&result[i].brand, &e.brand) {
                     if result[i].image_url.is_none() {
                         result[i].image_url = e.image_url.clone();
+                    }
+                    if result[i].caffeine_mg_per_100ml.is_none()
+                        && e.caffeine_mg_per_100ml.is_some()
+                    {
+                        result[i].caffeine_mg_per_100ml = e.caffeine_mg_per_100ml;
                     }
                     if !e.brand.is_empty() && e.brand.len() < result[i].brand.len() {
                         result[i].brand = e.brand.clone();
@@ -366,6 +755,7 @@ mod tests {
             countries_tags: vec!["en:united-states".into()],
             lang: "en".into(),
             image_url: Some("https://img.example/x.jpg".into()),
+            caffeine_100g: None,
         }
     }
 
@@ -411,10 +801,12 @@ mod tests {
             flavor: String::new(),
             kind: DrinkKind::Soda,
             image_url: None,
+            caffeine_mg_per_100ml: None,
         };
         let b = DrinkEntry {
             brand: "Coca-Cola".into(),
             image_url: Some("https://img/1.jpg".into()),
+            caffeine_mg_per_100ml: None,
             ..a.clone()
         };
         let different_brand = DrinkEntry {
@@ -423,6 +815,7 @@ mod tests {
             flavor: String::new(),
             kind: DrinkKind::Soda,
             image_url: None,
+            caffeine_mg_per_100ml: None,
         };
         let generic_other_brand = DrinkEntry {
             brand: "Best Value".into(),
@@ -445,6 +838,7 @@ mod tests {
             flavor: "Cherry".into(),
             kind: DrinkKind::Soda,
             image_url: None,
+            caffeine_mg_per_100ml: None,
         };
         let mut b = a.clone();
         b.image_url = Some("https://img/1.jpg".into());
@@ -468,6 +862,7 @@ mod tests {
                     flavor: "Classic".into(),
                     kind: DrinkKind::Soda,
                     image_url: None,
+                    caffeine_mg_per_100ml: None,
                 },
                 DrinkEntry {
                     name: "Pepsi Wild Cherry".into(),
@@ -475,6 +870,7 @@ mod tests {
                     flavor: "Wild Cherry".into(),
                     kind: DrinkKind::Soda,
                     image_url: None,
+                    caffeine_mg_per_100ml: None,
                 },
                 DrinkEntry {
                     name: "Cherry Coke Zero".into(),
@@ -482,6 +878,7 @@ mod tests {
                     flavor: "Cherry Zero".into(),
                     kind: DrinkKind::Soda,
                     image_url: None,
+                    caffeine_mg_per_100ml: None,
                 },
             ],
         }
@@ -519,6 +916,137 @@ mod tests {
         assert!(
             db.count(DrinkKind::Soda) > 0 && db.count(DrinkKind::EnergyDrink) > 0,
             "bundled DB should contain real compiled entries of both kinds"
+        );
+    }
+
+    /// The v0.2 #7 flavour vectors — the Python generator's `--selftest`
+    /// runs the SAME table; the twins must agree on every row.
+    #[test]
+    fn flavor_extraction_vectors_match_python_twin() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("Coca-Cola Classic", "Coca-Cola", "Classic"),
+            ("Pepsi", "Pepsi", ""),
+            ("Pepsi", "Pepsi-Cola", ""),
+            ("Ghost Energy Drink", "Ghost", ""),
+            ("Fanta Orange Soda", "Fanta", "Orange"),
+            (
+                "!Ajua!, Caffeine Free Soda, Mandarin Orange",
+                "!Ajua!",
+                "Mandarin Orange",
+            ),
+            ("1 Liter Pepsi", "Pepsi", ""),
+            ("3D Citrus Mist Energy Drink", "3D Energy", "Citrus Mist"),
+            (
+                "5-hour Energy Regular Strength Berry 1.93oz",
+                "5-hour Energy",
+                "Berry",
+            ),
+            (
+                "5-hour ENERGY Extra Strength Hawaiian Breeze",
+                "5-hour ENERGY",
+                "Hawaiian Breeze",
+            ),
+            ("Bang Peach Mango", "bang energy", "Peach Mango"),
+            ("Bang sour heads", "Bang", "Sour Heads"),
+            ("Amazon Energy", "Sambazon", ""),
+            (
+                "51 Fifty, Energy Drink, Fruit Punch",
+                "51 Fifty Energy",
+                "Fruit Punch",
+            ),
+            ("Amp energy, mixed berry energy drink", "", "Mixed Berry"),
+            ("Coca-Cola Cherry", "The Coca-Cola Company", "Cherry"),
+            ("ACTIVE Essential Amino Acid Blend", "OPTAVIA", ""),
+            (
+                "Monster Energy Ultra Sunrise",
+                "Monster Energy",
+                "Ultra Sunrise",
+            ),
+            (
+                "Monster Energy Ultra Sunrise 16 fl oz",
+                "Monster Energy",
+                "Ultra Sunrise",
+            ),
+            ("51 Fifty, Sugar Free Energy Drink", "51 Fifty Energy", ""),
+            ("Dr Pepper Zero Sugar", "Dr Pepper", ""),
+            ("Fanta Orange 12 fl oz", "", ""),
+            ("Fanta, Orange", "", "Orange"),
+            ("Ahold, diet root beer", "Ahold", "Root Beer"),
+            (
+                "A' siciliana, sicily blood orange soda",
+                "A' Siciliana",
+                "Sicily Blood Orange",
+            ),
+            ("Diet Coke", "Coca-Cola", ""),
+            (
+                "Coca-Cola, Cherry Zero Sugar, 12 pack",
+                "Coca-Cola",
+                "Cherry",
+            ),
+            (
+                "Gatorade Frost Glacier Freeze",
+                "Gatorade",
+                "Frost Glacier Freeze",
+            ),
+            ("7up, caffeine free naturally flavored soda", "", ""),
+            (
+                "2 Gingers, Premium Ginger Ale",
+                "Polar Corporation",
+                "Ginger Ale",
+            ),
+        ];
+        for (name, brand, expected) in cases {
+            assert_eq!(
+                &parse_flavor(name, brand),
+                expected,
+                "flavour of {name:?} (brand {brand:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn soda_tagged_row_with_energy_evidence_becomes_energy_drink() {
+        // Name-token evidence.
+        let by_name = filter_product(&raw("Amazon Energy", "Sambazon", &["en:sodas"])).unwrap();
+        assert_eq!(by_name.kind, DrinkKind::EnergyDrink);
+        // Brand-list evidence.
+        let by_brand =
+            filter_product(&raw("Bang Peach Mango", "bang energy", &["en:sodas"])).unwrap();
+        assert_eq!(by_brand.kind, DrinkKind::EnergyDrink);
+        // No evidence: stays soda even with a big-brand name.
+        let plain = filter_product(&raw("Coca-Cola Classic", "Coca-Cola", &["en:sodas"])).unwrap();
+        assert_eq!(plain.kind, DrinkKind::Soda);
+        // OFF tag wins when it already says energy.
+        let tagged =
+            filter_product(&raw("Mystery Drink", "Generic", &["en:energy-drinks"])).unwrap();
+        assert_eq!(tagged.kind, DrinkKind::EnergyDrink);
+    }
+
+    #[test]
+    fn caffeine_conversion_and_label() {
+        assert_eq!(caffeine_mg_per_100ml(0.032), Some(32.0));
+        assert_eq!(caffeine_mg_per_100ml(0.0315), Some(31.5));
+        assert_eq!(caffeine_mg_per_100ml(0.0), None);
+        assert_eq!(caffeine_mg_per_100ml(2.5), None); // 2500 mg — data error
+        let mut r = raw("Energy Drink X", "Brand", &["en:energy-drinks"]);
+        r.caffeine_100g = Some(0.032);
+        let e = filter_product(&r).unwrap();
+        assert_eq!(e.caffeine_mg_per_100ml, Some(32.0));
+        assert_eq!(e.caffeine_label().as_deref(), Some("32 mg/100ml"));
+    }
+
+    #[test]
+    fn old_pack_entries_without_caffeine_key_still_load() {
+        let json = r#"{"version":1,"entries":[
+            {"name":"Cola","brand":"B","flavor":"Classic","kind":"Soda","image_url":null}
+        ]}"#;
+        let db: DrinksDb = serde_json::from_str(json).unwrap();
+        assert_eq!(db.entries[0].caffeine_mg_per_100ml, None);
+        // And the new field serialises away entirely when absent.
+        let out = serde_json::to_string(&db.entries[0]).unwrap();
+        assert!(
+            !out.contains("caffeine"),
+            "absent caffeine stays absent: {out}"
         );
     }
 }

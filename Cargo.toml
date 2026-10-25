@@ -1,6 +1,6 @@
 [package]
 name = "favelists"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Sean Shaffer"]
@@ -33,6 +33,10 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 # windows-msvc target from Linux.
 ureq = { version = "2", default-features = false, features = ["json", "native-tls", "charset"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Text rasterisation for the share-card export (v0.2 #8): pure Rust, no
+# native dependencies. Fonts are loaded from the OS at runtime (Segoe UI /
+# Arial / DejaVu Sans) and are NEVER bundled into the repo or the binary.
+fontdue = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rfd = "0.15"
 

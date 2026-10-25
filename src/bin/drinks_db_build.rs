@@ -60,13 +60,14 @@ pub fn build(text: &str, version: u32) -> DrinksDb {
         }
     };
     let col = |name: &str| header.iter().position(|h| h == name);
-    let (i_name, i_brands, i_cats, i_countries, i_lang, i_img) = (
+    let (i_name, i_brands, i_cats, i_countries, i_lang, i_img, i_caf) = (
         col("product_name"),
         col("brands"),
         col("categories_tags"),
         col("countries_tags"),
         col("lang"),
         col("image_front_url").or_else(|| col("image_url")),
+        col("caffeine_100g"),
     );
     let get = |fields: &[&str], idx: Option<usize>| -> String {
         idx.and_then(|i| fields.get(i))
@@ -99,6 +100,14 @@ pub fn build(text: &str, version: u32) -> DrinksDb {
                     None
                 } else {
                     Some(u)
+                }
+            },
+            caffeine_100g: {
+                let c = get(&fields, i_caf);
+                if c.is_empty() {
+                    None
+                } else {
+                    c.parse::<f64>().ok()
                 }
             },
         };

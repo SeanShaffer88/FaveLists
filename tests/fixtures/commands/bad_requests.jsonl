@@ -1,0 +1,4 @@
+{"command":"nope.nope","params":{}}
+{"command":"list.get","params":{"list_id":99}}
+{"command":"list.create","params":{"name":"X"}}
+this line is not json

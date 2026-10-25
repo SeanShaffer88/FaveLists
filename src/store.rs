@@ -12,6 +12,12 @@ use std::path::{Path, PathBuf};
 
 pub const DATA_DIR_NAME: &str = "FaveListsData";
 pub const LIBRARY_FILE: &str = "library.json";
+/// Autosave journal (v0.2 program #4): a shadow copy of the library,
+/// rewritten atomically on every [`Store::save_library`]. It is only ever
+/// *read* by [`Store::load_library_recovering`], and only when the main
+/// library file is missing or fails to parse — a parseable main file
+/// always wins, so the journal can never resurrect older state over newer.
+pub const JOURNAL_FILE: &str = "library.journal.json";
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const COVERS_DIR: &str = "covers";
 pub const DRINKS_FILE: &str = "drinks.json";
@@ -51,6 +57,15 @@ pub struct Store {
     pub data_dir: PathBuf,
 }
 
+/// The outcome of [`Store::load_library_recovering`]: the library, plus
+/// whether it came from the autosave journal because the main library
+/// file was missing or corrupt.
+#[derive(Debug, Default)]
+pub struct LibraryLoad {
+    pub library: Library,
+    pub recovered_from_journal: bool,
+}
+
 impl Store {
     /// Open (creating if needed) the store rooted at `base_dir` — the exe
     /// folder in production, a temp folder in tests.
@@ -83,6 +98,10 @@ impl Store {
         self.data_dir.join(LIBRARY_FILE)
     }
 
+    pub fn journal_path(&self) -> PathBuf {
+        self.data_dir.join(JOURNAL_FILE)
+    }
+
     pub fn settings_path(&self) -> PathBuf {
         self.data_dir.join(SETTINGS_FILE)
     }
@@ -95,8 +114,52 @@ impl Store {
         load_json_or_default(&self.library_path())
     }
 
+    /// Load the library, recovering from the autosave journal when the
+    /// main file is missing or unparseable. The result says whether
+    /// recovery happened so the surface can tell the user (the GUI puts it
+    /// in the status line). Main-file-wins: when the main file parses, the
+    /// journal is never consulted. When both are unusable, the main file's
+    /// error is returned (a brand-new store — neither file present — loads
+    /// as a default library with no recovery flag).
+    pub fn load_library_recovering(&self) -> io::Result<LibraryLoad> {
+        let mut main_error: Option<io::Error> = None;
+        match fs::read_to_string(self.library_path()) {
+            Ok(text) => match serde_json::from_str::<Library>(&text) {
+                Ok(library) => {
+                    return Ok(LibraryLoad {
+                        library,
+                        recovered_from_journal: false,
+                    })
+                }
+                Err(e) => {
+                    main_error = Some(io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => main_error = Some(e),
+        }
+        // The main file is missing or unusable: try the journal.
+        if let Ok(text) = fs::read_to_string(self.journal_path()) {
+            if let Ok(library) = serde_json::from_str::<Library>(&text) {
+                return Ok(LibraryLoad {
+                    library,
+                    recovered_from_journal: true,
+                });
+            }
+        }
+        match main_error {
+            Some(e) => Err(e),
+            None => Ok(LibraryLoad::default()),
+        }
+    }
+
+    /// Save the library and, through this same funnel, refresh the
+    /// autosave journal with the identical state. Both the GUI's
+    /// `persist()` and the JSON channel's post-mutation save come through
+    /// here, so the journal can never miss a state the main file has.
     pub fn save_library(&self, lib: &Library) -> io::Result<()> {
-        save_json_atomic(&self.library_path(), lib)
+        save_json_atomic(&self.library_path(), lib)?;
+        save_json_atomic(&self.journal_path(), lib)
     }
 
     pub fn load_settings(&self) -> io::Result<Settings> {

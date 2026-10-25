@@ -1,0 +1,17 @@
+{
+  "type": "standard",
+  "title": "Radiohead",
+  "displaytitle": "<span lang=\"en\" dir=\"ltr\"><span class=\"mw-page-title-main\">Radiohead</span></span>",
+  "thumbnail": {
+    "source": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a1/RadioheadO2211125_composite.jpg/330px-RadioheadO2211125_composite.jpg?utm_source=en.wikipedia.org&utm_campaign=api&utm_content=thumbnail",
+    "width": 330,
+    "height": 120
+  },
+  "originalimage": {
+    "source": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a1/RadioheadO2211125_composite.jpg/3840px-RadioheadO2211125_composite.jpg?utm_source=en.wikipedia.org&utm_campaign=api&utm_content=thumbnail",
+    "width": 5940,
+    "height": 2160
+  },
+  "description": "English rock band",
+  "extract": "Radiohead are an English rock band formed in Abingdon, Oxfordshire, in 1985. The members are Thom Yorke ; brothers Jonny Greenwood and Colin Greenwood (bass); Ed O'Brien ; and Philip Selway (drums). They have worked with the producer Nigel Godrich and the cover artist Stanley Donwood since 1994. Radiohead's experimental approach is credited with advancing the sound of alternative rock."
+}

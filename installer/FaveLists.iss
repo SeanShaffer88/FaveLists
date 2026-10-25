@@ -1,12 +1,12 @@
 ; FaveLists — per-user Inno Setup installer (Inno Setup 6)
 ; Per-user install (no admin) so the app's data folder can live next to the
 ; exe inside the install directory, per the portable-style storage design.
-; Build: ISCC /DAppVersion=0.1.1 installer\FaveLists.iss
+; Build: ISCC /DAppVersion=0.2.0 installer\FaveLists.iss
 ; Expects the release exe at ..\target\release\favelists.exe relative to this
 ; script (the release workflow builds it before invoking ISCC).
 
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.2.0"
 #endif
 
 [Setup]

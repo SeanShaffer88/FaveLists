@@ -187,6 +187,14 @@ pub struct Item {
     /// image, if any.
     #[serde(default)]
     pub cover: Option<String>,
+    /// Personal rating, 1–10 (v0.2 program #5 — SEAN's direction reversed
+    /// the v1 exclusion of ratings/notes). `None` = unrated. Not a category
+    /// field: it belongs to the entry, not the work.
+    #[serde(default)]
+    pub rating: Option<u8>,
+    /// Personal free-text note (v0.2 program #5). Empty = no note.
+    #[serde(default)]
+    pub note: String,
     /// Unix seconds when the item was added.
     pub added_at: i64,
 }
@@ -200,6 +208,8 @@ impl Item {
             provider_id: None,
             source: "manual".to_string(),
             cover: None,
+            rating: None,
+            note: String::new(),
             added_at: now_unix(),
         }
     }
@@ -266,6 +276,8 @@ pub enum SortKind {
     TitleAZ,
     Year,
     DateAdded,
+    /// Highest personal rating first; unrated items last (v0.2 #5).
+    Rating,
 }
 
 impl FavList {
@@ -346,6 +358,17 @@ impl FavList {
             }
             SortKind::DateAdded => {
                 self.items.sort_by_key(|i| i.added_at);
+            }
+            SortKind::Rating => {
+                // Highest first; unrated last. `sort_by` is stable, so
+                // items with equal ratings (and the unrated tail) keep
+                // their current relative order.
+                self.items.sort_by(|a, b| match (a.rating, b.rating) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                });
             }
         }
     }
@@ -499,9 +522,15 @@ impl Settings {
     /// set if one exists, otherwise all of the category's fields.
     pub fn remembered_export_fields(&self, category: Category) -> Vec<String> {
         if let Some(saved) = self.export_fields.get(category.id()) {
+            // The v0.2 #5 pseudo-fields ("rating"/"note") are not category
+            // fields but are legitimate remembered export choices.
             let valid: Vec<String> = saved
                 .iter()
-                .filter(|k| category.fields().iter().any(|f| f.key == k.as_str()))
+                .filter(|k| {
+                    k.as_str() == "rating"
+                        || k.as_str() == "note"
+                        || category.fields().iter().any(|f| f.key == k.as_str())
+                })
                 .cloned()
                 .collect();
             if !valid.is_empty() {
@@ -663,6 +692,27 @@ mod tests {
         assert_eq!(list.items[2].title, "No Year"); // missing year last
         list.sort(SortKind::DateAdded);
         assert_eq!(list.items[0].title, "Alien");
+    }
+
+    #[test]
+    fn sort_by_rating_unrated_last_and_stable() {
+        let mut list = FavList::new(1, "Films", Category::Movies, false);
+        let mut a = item(1, "Mid A");
+        a.rating = Some(5);
+        let b = item(2, "Unrated B");
+        let mut c = item(3, "Top");
+        c.rating = Some(10);
+        let mut d = item(4, "Mid B");
+        d.rating = Some(5);
+        let e = item(5, "Unrated A");
+        for i in [a, b, c, d, e] {
+            list.add_item(i);
+        }
+        list.sort(SortKind::Rating);
+        let titles: Vec<&str> = list.items.iter().map(|i| i.title.as_str()).collect();
+        // 10 first, the two 5s in their original relative order, then the
+        // two unrated in theirs.
+        assert_eq!(titles, ["Top", "Mid A", "Mid B", "Unrated B", "Unrated A"]);
     }
 
     #[test]

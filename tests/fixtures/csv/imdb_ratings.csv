@@ -1,0 +1,5 @@
+Const,Your Rating,Date Rated,Title,URL,Title Type,IMDb Rating,Year,Genres,Num Votes,Release Date,Directors
+tt9000001,9,2026-01-02,The Clockwork Harbor,https://example.invalid/title/tt9000001,movie,8.1,2019,"Adventure, Drama",12000,2019-05-01,R. Calloway
+tt9000002,,2026-01-03,Harbor Lights,https://example.invalid/title/tt9000002,tvSeries,7.4,2022,Drama,3000,2022-09-15,S. Ibarra
+tt9000003,7,2026-01-04,The Last Cartographer,https://example.invalid/title/tt9000003,movie,6.9,2011,Adventure,5400,2011-03-20,M. Okafor
+tt9000004,8,2026-01-05,Harbor Lights: The Return,https://example.invalid/title/tt9000004,tvMiniSeries,8.8,2024,"Drama, Mystery",900,2024-01-01,S. Ibarra

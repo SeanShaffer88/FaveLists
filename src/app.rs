@@ -6,9 +6,9 @@
 use crate::backup::{BackupScope, ImportReport};
 use crate::drinks::{DrinkKind, DrinksDb};
 use crate::layout::{self, Arrangement};
-use crate::model::{Category, FavList, Item, Library, Settings, SortKind};
+use crate::model::{Category, FavList, Library, Settings, SortKind};
 use crate::providers::{self, Suggestion};
-use crate::render::{self, FitMode, ImageFormat};
+use crate::render::{FitMode, ImageFormat};
 use crate::store::Store;
 use eframe::egui;
 use std::collections::{BTreeMap, HashMap};
@@ -143,13 +143,30 @@ struct BackupState {
 pub struct FaveApp {
     base_dir: PathBuf,
     store: Store,
-    library: Library,
+    // `pub(crate)` on the fields `app_bulk.rs` (Slice 3) shares: it holds
+    // the bulk-selection bar, the duplicates view, and the grid-drop
+    // handling as a second `impl FaveApp` block.
+    pub(crate) library: Library,
     settings: Settings,
     drinks: DrinksDb,
-    selected_list: Option<u64>,
-    selected_item: Option<u64>,
+    pub(crate) selected_list: Option<u64>,
+    pub(crate) selected_item: Option<u64>,
     filter: String,
-    status: String,
+    pub(crate) status: String,
+    // bulk selection + duplicates (v0.2 #9 / #3, see app_bulk.rs)
+    pub(crate) bulk_selection: Vec<u64>,
+    pub(crate) select_mode: bool,
+    pub(crate) dup: crate::app_bulk::DuplicatesState,
+    /// Sidebar list-row rects from the last frame, for drag-to-list drops.
+    pub(crate) sidebar_list_rects: Vec<(u64, egui::Rect)>,
+    // undo/redo (v0.2 #4): the session history the registry records into
+    history: crate::commands::History,
+    // global search (v0.2 #2)
+    global_query: String,
+    global_hits: Vec<crate::search::SearchHit>,
+    /// The exact query the cached `global_hits` were computed for.
+    global_hits_query: String,
+    global_focus_request: bool,
     // search
     search_query: String,
     search_for_list: Option<u64>,
@@ -161,6 +178,9 @@ pub struct FaveApp {
     // detail editing
     edit_title: String,
     edit_fields: BTreeMap<String, String>,
+    // personal rating + note (v0.2 #5)
+    edit_rating: Option<u8>,
+    edit_note: String,
     editing_item: Option<u64>,
     // textures
     cover_textures: HashMap<String, egui::TextureHandle>,
@@ -172,12 +192,15 @@ pub struct FaveApp {
     text_export: TextExportState,
     image_export: ImageExportState,
     backup_ui: BackupState,
+    // share card + CSV import (v0.2 #8 / #10, see app_share.rs)
+    pub(crate) share_ui: crate::app_share::ShareCardState,
+    pub(crate) csv_ui: crate::app_share::CsvImportState,
     confirm_delete_list: Option<u64>,
     // background plumbing
     tx: Sender<BgMsg>,
     rx: Receiver<BgMsg>,
     pending_add: bool,
-    drag_source: Option<usize>,
+    pub(crate) drag_source: Option<usize>,
     drinks_check_started: bool,
 }
 
@@ -186,7 +209,11 @@ impl FaveApp {
         let store = Store::open(&base_dir).unwrap_or_else(|_| {
             Store::open_at(&base_dir.join(crate::store::DATA_DIR_NAME)).expect("create data folder")
         });
-        let library = store.load_library().unwrap_or_default();
+        // Journal-recovering load (#4): a corrupt/missing main library file
+        // falls back to the autosave journal, and the user is told.
+        let load = store.load_library_recovering().unwrap_or_default();
+        let recovered = load.recovered_from_journal;
+        let library = load.library;
         let settings = store.load_settings().unwrap_or_default();
         let drinks = DrinksDb::load_effective(&store.data_dir);
         let (tx, rx) = channel();
@@ -198,8 +225,21 @@ impl FaveApp {
             drinks,
             selected_list: None,
             selected_item: None,
+            bulk_selection: Vec::new(),
+            select_mode: false,
+            dup: crate::app_bulk::DuplicatesState::default(),
+            sidebar_list_rects: Vec::new(),
             filter: String::new(),
-            status: "Welcome to FaveLists.".to_string(),
+            status: if recovered {
+                "Recovered your library from the autosave journal.".to_string()
+            } else {
+                "Welcome to FaveLists.".to_string()
+            },
+            history: crate::commands::History::new(),
+            global_query: String::new(),
+            global_hits: Vec::new(),
+            global_hits_query: String::new(),
+            global_focus_request: false,
             search_query: String::new(),
             search_for_list: None,
             suggestions: Vec::new(),
@@ -209,6 +249,8 @@ impl FaveApp {
             sent_query: String::new(),
             edit_title: String::new(),
             edit_fields: BTreeMap::new(),
+            edit_rating: None,
+            edit_note: String::new(),
             editing_item: None,
             cover_textures: HashMap::new(),
             thumb_textures: HashMap::new(),
@@ -218,6 +260,8 @@ impl FaveApp {
             text_export: TextExportState::default(),
             image_export: ImageExportState::default(),
             backup_ui: BackupState::default(),
+            share_ui: crate::app_share::ShareCardState::default(),
+            csv_ui: crate::app_share::CsvImportState::default(),
             confirm_delete_list: None,
             tx,
             rx,
@@ -227,13 +271,31 @@ impl FaveApp {
         }
     }
 
-    fn persist(&mut self) {
+    pub(crate) fn persist(&mut self) {
         if let Err(e) = self.store.save_library(&self.library) {
             self.status = format!("Could not save library: {e}");
         }
         if let Err(e) = self.store.save_settings(&self.settings) {
             self.status = format!("Could not save settings: {e}");
         }
+    }
+
+    /// Route a core operation through the command registry (v0.2 program
+    /// #1) — the same dispatch the headless JSON channel uses. The registry
+    /// mutates `self.library`; persistence stays with the caller
+    /// (`persist()`), exactly as before routing.
+    pub(crate) fn dispatch(
+        &mut self,
+        name: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, crate::commands::CommandError> {
+        let covers = self.store.covers_dir();
+        let mut ctx = crate::commands::CommandContext::with_history(
+            &mut self.library,
+            &covers,
+            &mut self.history,
+        );
+        crate::commands::dispatch(&mut ctx, name, &params)
     }
 
     fn selected_list_ref(&self) -> Option<&FavList> {
@@ -389,11 +451,15 @@ impl FaveApp {
     }
 
     fn apply_pending_add(&mut self, list_id: u64, pending: PendingAdd) {
-        let item_id = self.library.alloc_item_id();
-        let mut item = Item::new(item_id, pending.title.clone());
-        item.fields = pending.fields;
-        item.provider_id = pending.provider_id;
-        item.source = pending.source;
+        let title = pending.title.clone();
+        let fields = serde_json::to_value(&pending.fields).unwrap_or_default();
+        let mut params = serde_json::json!({
+            "list_id": list_id,
+            "title": pending.title,
+            "fields": fields,
+            "provider_id": pending.provider_id,
+            "source": pending.source,
+        });
         if let Some(bytes) = &pending.cover_bytes {
             let ext = image::guess_format(bytes)
                 .map(|f| match f {
@@ -402,24 +468,36 @@ impl FaveApp {
                     _ => "jpg",
                 })
                 .unwrap_or("jpg");
-            let name = format!("cover-{item_id}.{ext}");
-            let path = self.store.covers_dir().join(&name);
-            if std::fs::write(&path, bytes).is_ok() {
-                item.cover = Some(name);
-            }
+            params["cover_bytes_base64"] =
+                serde_json::Value::String(crate::commands::base64_encode(bytes));
+            params["cover_ext"] = serde_json::Value::String(ext.to_string());
         }
-        let Some(list) = self.library.list_mut(list_id) else {
-            return;
+        // Preserve the pre-routing behaviour on a cover-write failure (the
+        // item was still added, just without its cover): retry once with
+        // the cover bytes stripped.
+        let mut bare = params.clone();
+        if let Some(o) = bare.as_object_mut() {
+            o.remove("cover_bytes_base64");
+            o.remove("cover_ext");
+        }
+        let result = match self.dispatch("item.add", params) {
+            Err(e) if e.code == "io" && pending.cover_bytes.is_some() => {
+                self.dispatch("item.add", bare)
+            }
+            other => other,
         };
-        match list.add_item(item) {
-            crate::model::AddOutcome::Added => {
-                self.status = format!("Added {}.", pending.title);
+        match result {
+            Ok(r) if r["outcome"] == "duplicate" => {
+                self.status = format!("{title} is already in this list.");
+            }
+            Ok(_) => {
+                self.status = format!("Added {title}.");
                 self.search_query.clear();
                 self.suggestions.clear();
                 self.sent_query.clear();
             }
-            crate::model::AddOutcome::Duplicate => {
-                self.status = format!("{} is already in this list.", pending.title);
+            Err(_) => {
+                // The list vanished between pick and add; nothing to do.
             }
         }
         self.persist();
@@ -526,9 +604,16 @@ impl FaveApp {
             }
             let cover_url = providers::details_cover_url(category, &sug, &settings)
                 .or_else(|| sug.cover_url.clone());
-            let cover_bytes = cover_url
+            let mut cover_bytes = cover_url
                 .as_deref()
                 .and_then(|u| providers::download_bytes(u).ok());
+            if cover_bytes.is_none() && category == Category::Artists {
+                // #6 fallback: MusicBrainz has no artist photos, so try
+                // the key-free Deezer → Wikipedia chain by artist name.
+                // Still best-effort — a miss leaves the item coverless,
+                // exactly as before, and manual upload is unaffected.
+                cover_bytes = providers::artist_image::fetch_artist_image(&sug.title);
+            }
             let _ = tx.send(BgMsg::AddReady {
                 list_id,
                 title: sug.title.clone(),
@@ -549,6 +634,12 @@ fn suggestion_from_drink(e: crate::drinks::DrinkEntry) -> Suggestion {
     if !e.flavor.is_empty() {
         fields.insert("flavor".to_string(), e.flavor.clone());
     }
+    // v0.2 #7: surface caffeine from the pack when the entry carries it
+    // (e.g. "32 mg/100ml"); lands in the entry's free `fields` bag under
+    // the `caffeine` key, like brand/flavor.
+    if let Some(label) = e.caffeine_label() {
+        fields.insert("caffeine".to_string(), label);
+    }
     Suggestion {
         provider_id: format!("{}:{}", e.brand, e.name),
         source: "drinks-db",
@@ -565,6 +656,23 @@ pub fn kind_of(category: Category) -> Option<DrinkKind> {
     category.drinks_kind()
 }
 
+/// Stable machine id for an arrangement — the `export.image` command's
+/// `arrangement` param (the registry parses these back).
+fn arrangement_id(a: Arrangement) -> &'static str {
+    match a {
+        Arrangement::UniformGrid => "uniform_grid",
+        Arrangement::Topster => "topster",
+        Arrangement::Mosaic => "mosaic",
+        Arrangement::ShelfRows => "shelf_rows",
+        Arrangement::Scattered => "scattered",
+        Arrangement::Spiral => "spiral",
+        Arrangement::Honeycomb => "honeycomb",
+        Arrangement::Ring => "ring",
+        Arrangement::Filmstrip => "filmstrip",
+        Arrangement::Masonry => "masonry",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame rendering
 // ---------------------------------------------------------------------------
@@ -578,6 +686,8 @@ impl eframe::App for FaveApp {
         self.maybe_start_drinks_auto_update();
         self.poll_background();
         self.maybe_fire_search(ctx);
+        self.handle_shortcuts(ctx);
+        self.refresh_global_results();
 
         egui::SidePanel::left("sidebar")
             .default_width(230.0)
@@ -607,7 +717,15 @@ impl eframe::App for FaveApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| self.main_ui(ui));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.dup.open {
+                self.duplicates_ui(ui);
+            } else if self.global_search_active() {
+                self.global_results_ui(ui);
+            } else {
+                self.main_ui(ui);
+            }
+        });
 
         self.new_list_dialog(ctx);
         self.manual_dialog(ctx);
@@ -615,6 +733,8 @@ impl eframe::App for FaveApp {
         self.text_export_dialog(ctx);
         self.image_export_dialog(ctx);
         self.backup_dialog(ctx);
+        self.share_card_dialog(ctx);
+        self.csv_import_dialog(ctx);
         if self.searching || self.pending_add {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -647,6 +767,153 @@ impl FaveApp {
         }
     }
 
+    // -- global shortcuts: Ctrl+K search focus, Ctrl+Z / Ctrl+Y undo/redo --
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
+            self.global_focus_request = true;
+        }
+        // Redo combos first so Ctrl+Shift+Z isn't swallowed by the undo one.
+        let redo = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Z,
+            ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)
+        });
+        if redo {
+            self.apply_history_command("history.redo", "redone", "Redo");
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+            self.apply_history_command("history.undo", "undone", "Undo");
+        }
+    }
+
+    /// Dispatch `history.undo`/`history.redo` and report the outcome in the
+    /// status line, persisting like any other mutation.
+    fn apply_history_command(&mut self, name: &str, flag: &str, verb: &str) {
+        match self.dispatch(name, serde_json::json!({})) {
+            Ok(result) => {
+                if result[flag].as_bool() == Some(true) {
+                    let cmd = result["command"].as_str().unwrap_or("change");
+                    self.status = format!("{verb}: {cmd}.");
+                } else {
+                    self.status = format!("Nothing to {}.", verb.to_lowercase());
+                }
+            }
+            Err(e) => {
+                self.status = format!("{verb} failed: {e}");
+            }
+        }
+        self.repair_selection();
+        // The library changed under any active global search: force the
+        // cached hits to recompute on the next frame.
+        self.global_hits_query.clear();
+        self.persist();
+    }
+
+    /// After an undo/redo the selection may point at a list or item that
+    /// no longer exists; drop dangling selections.
+    pub(crate) fn repair_selection(&mut self) {
+        if let Some(list_id) = self.selected_list {
+            match self.library.list(list_id) {
+                None => {
+                    self.selected_list = None;
+                    self.selected_item = None;
+                }
+                Some(list) => {
+                    if let Some(item_id) = self.selected_item {
+                        if list.item(item_id).is_none() {
+                            self.selected_item = None;
+                            self.editing_item = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -- global search (#2) -------------------------------------------------
+
+    fn global_search_active(&self) -> bool {
+        !self.global_query.trim().is_empty()
+    }
+
+    /// Recompute the cached hits when the query changed. The query itself
+    /// goes through the `library.search` command — never an inline filter.
+    fn refresh_global_results(&mut self) {
+        let q = self.global_query.trim().to_string();
+        if q == self.global_hits_query {
+            return;
+        }
+        self.global_hits_query = q.clone();
+        if q.is_empty() {
+            self.global_hits.clear();
+            return;
+        }
+        match self.dispatch("library.search", serde_json::json!({"query": q})) {
+            Ok(result) => self.global_hits = crate::search::hits_from_result(&result),
+            Err(_) => self.global_hits.clear(),
+        }
+    }
+
+    fn global_results_ui(&mut self, ui: &mut egui::Ui) {
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            ui.heading(format!("Search results for “{}”", self.global_query.trim()));
+            ui.label(
+                egui::RichText::new(format!("{} found", self.global_hits.len())).color(COL_MUTED),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("✕ Clear search (Esc)").clicked() {
+                    clear = true;
+                }
+            });
+        });
+        if clear {
+            self.global_query.clear();
+            return;
+        }
+        ui.separator();
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.global_query.clear();
+            return;
+        }
+        if self.global_hits.is_empty() {
+            ui.label(egui::RichText::new("No matches in any list.").color(COL_MUTED));
+            return;
+        }
+        let groups = crate::search::grouped(&self.global_hits);
+        let mut jump: Option<(u64, u64)> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (list_id, idxs) in &groups {
+                let first = &self.global_hits[idxs[0]];
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("{} · {}", first.list_name, first.category.name()))
+                        .strong(),
+                );
+                for &hi in idxs {
+                    let hit = &self.global_hits[hi];
+                    let label = match &hit.year {
+                        Some(y) => format!("{} ({})", hit.title, y),
+                        None => hit.title.clone(),
+                    };
+                    if ui.selectable_label(false, label).clicked() {
+                        jump = Some((*list_id, hit.item_id));
+                    }
+                }
+            }
+        });
+        if let Some((list_id, item_id)) = jump {
+            self.selected_list = Some(list_id);
+            self.bulk_selection.clear();
+            self.filter.clear();
+            self.global_query.clear();
+            self.select_item(item_id);
+        }
+    }
+
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -669,12 +936,32 @@ impl FaveApp {
         if ui.button("＋ New list").clicked() {
             self.new_list.open = true;
         }
+        if ui.button("⧉ Find duplicates").clicked() {
+            self.open_duplicates();
+        }
         if ui.button("⇪ Backup / Restore").clicked() {
             self.backup_ui.open = true;
             self.backup_ui.selected = self.library.lists.iter().map(|l| (l.id, false)).collect();
             self.backup_ui.message.clear();
         }
+        if ui.button("⇩ Import CSV…").clicked() {
+            self.open_csv_import();
+        }
+        // Global search (#2): searches every list via the library.search
+        // command; results replace the main area while the query is active.
+        let search_resp = ui.add(
+            egui::TextEdit::singleline(&mut self.global_query)
+                .desired_width(ui.available_width())
+                .hint_text("Search all lists… (Ctrl+K)"),
+        );
+        if self.global_focus_request {
+            search_resp.request_focus();
+            self.global_focus_request = false;
+        }
         ui.separator();
+        // Record this frame's list-row rects so a grid drag released over
+        // a row can drop the item onto that list (#9, see app_bulk.rs).
+        self.sidebar_list_rects.clear();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for cat in Category::ALL {
                 let lists = self.library.lists_in_category(cat);
@@ -685,9 +972,12 @@ impl FaveApp {
                     for list in lists {
                         let label = format!("{} ({})", list.name, list.items.len());
                         let selected = self.selected_list == Some(list.id);
-                        if ui.selectable_label(selected, label).clicked() {
+                        let resp = ui.selectable_label(selected, label);
+                        self.sidebar_list_rects.push((list.id, resp.rect));
+                        if resp.clicked() {
                             self.selected_list = Some(list.id);
                             self.selected_item = None;
+                            self.bulk_selection.clear();
                             self.filter.clear();
                         }
                     }
@@ -740,9 +1030,10 @@ impl FaveApp {
             let mut ranked = list.ranked;
             let ranked_label = if ranked { "Ranked" } else { "Unranked" };
             if ui.checkbox(&mut ranked, ranked_label).changed() {
-                if let Some(l) = self.library.list_mut(list_id) {
-                    l.set_ranked(ranked);
-                }
+                let _ = self.dispatch(
+                    "list.set_ranked",
+                    serde_json::json!({"list_id": list_id, "ranked": ranked}),
+                );
                 self.persist();
             }
             if ui.button("Sort A–Z").clicked() {
@@ -754,18 +1045,24 @@ impl FaveApp {
             if ui.button("Sort by added").clicked() {
                 self.sort_list(list_id, SortKind::DateAdded);
             }
+            if ui.button("Sort by rating").clicked() {
+                self.sort_list(list_id, SortKind::Rating);
+            }
             if ui.button("Export text…").clicked() {
                 self.open_text_export(&list);
             }
             if ui.button("Export image…").clicked() {
                 self.open_image_export(&list);
             }
+            if ui.button("Share card…").clicked() {
+                self.open_share_card(&list);
+            }
             if self.confirm_delete_list == Some(list_id) {
                 if ui
                     .button(egui::RichText::new("Confirm delete list?").color(COL_ACCENT))
                     .clicked()
                 {
-                    self.library.remove_list(list_id);
+                    let _ = self.dispatch("list.delete", serde_json::json!({"list_id": list_id}));
                     self.selected_list = None;
                     self.selected_item = None;
                     self.confirm_delete_list = None;
@@ -817,7 +1114,23 @@ impl FaveApp {
                     .desired_width(200.0)
                     .hint_text("Filter this list…"),
             );
+            // Bulk selection (#9): with Select on, plain clicks toggle
+            // items in/out of the bulk selection; Ctrl+click toggles in
+            // either mode. The bulk action bar appears in app_bulk.rs.
+            ui.toggle_value(&mut self.select_mode, "☑ Select");
+            if !self.bulk_selection.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("{} selected", self.bulk_selection.len()))
+                        .color(COL_MUTED)
+                        .small(),
+                );
+            }
         });
+        // Drop bulk-selected ids that are no longer in this list (the
+        // items were removed, merged away, or undone since selecting).
+        self.bulk_selection
+            .retain(|id| list.items.iter().any(|i| i.id == *id));
+        self.bulk_bar_ui(ui, &list);
         ui.add_space(4.0);
         if list.items.is_empty() {
             ui.label(
@@ -830,9 +1143,16 @@ impl FaveApp {
     }
 
     fn sort_list(&mut self, list_id: u64, kind: SortKind) {
-        if let Some(l) = self.library.list_mut(list_id) {
-            l.sort(kind);
-        }
+        let kind = match kind {
+            SortKind::TitleAZ => "title",
+            SortKind::Year => "year",
+            SortKind::DateAdded => "added",
+            SortKind::Rating => "rating",
+        };
+        let _ = self.dispatch(
+            "list.sort",
+            serde_json::json!({"list_id": list_id, "kind": kind}),
+        );
         self.persist();
     }
 
@@ -906,6 +1226,10 @@ impl FaveApp {
             .collect();
         let cols = ((ui.available_width() / (TILE_W + 10.0)) as usize).max(1);
         let mut clicked: Option<u64> = None;
+        let mut toggled: Option<u64> = None;
+        // Ctrl+click toggles bulk selection in any mode; in Select mode
+        // every click toggles (#9).
+        let toggle_clicks = self.select_mode || ui.ctx().input(|i| i.modifiers.ctrl);
         let mut tile_rects: Vec<(usize, egui::Rect)> = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for chunk in visible.chunks(cols) {
@@ -969,8 +1293,32 @@ impl FaveApp {
                                     egui::StrokeKind::Inside,
                                 );
                             }
+                            if self.bulk_selection.contains(&item.id) {
+                                painter.rect_stroke(
+                                    rect,
+                                    4.0,
+                                    egui::Stroke::new(2.0f32, COL_ACCENT),
+                                    egui::StrokeKind::Inside,
+                                );
+                                let badge = egui::Rect::from_min_size(
+                                    egui::pos2(rect.max.x - 24.0, rect.min.y + 4.0),
+                                    egui::vec2(20.0, 20.0),
+                                );
+                                painter.rect_filled(badge, 4.0, COL_DEEP_RED);
+                                painter.text(
+                                    badge.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "✓",
+                                    egui::FontId::proportional(13.0),
+                                    COL_TEXT,
+                                );
+                            }
                             if resp.clicked() {
-                                clicked = Some(item.id);
+                                if toggle_clicks {
+                                    toggled = Some(item.id);
+                                } else {
+                                    clicked = Some(item.id);
+                                }
                             }
                             if resp.drag_started() {
                                 self.drag_source = Some(idx);
@@ -990,39 +1338,35 @@ impl FaveApp {
                 });
             }
         });
+        if let Some(id) = toggled {
+            self.toggle_bulk(id);
+        }
         if let Some(id) = clicked {
             self.select_item(id);
         }
-        // Drag reorder: on release, drop onto the tile under the pointer.
-        if ui.ctx().input(|i| i.pointer.any_released()) {
-            if let (Some(from), Some(pos)) = (
-                self.drag_source.take(),
-                ui.ctx().input(|i| i.pointer.interact_pos()),
-            ) {
-                if let Some((to, _)) = tile_rects.iter().find(|(_, r)| r.contains(pos)) {
-                    if *to != from {
-                        if let Some(l) = self.library.list_mut(list.id) {
-                            l.move_item(from, *to);
-                        }
-                        self.persist();
-                    }
-                }
-            } else {
-                self.drag_source = None;
-            }
-        }
+        // Drag release: reorder within the grid, or drag-to-list onto a
+        // sidebar row — both live in app_bulk.rs (#9).
+        self.grid_drop(ui, list, &tile_rects);
     }
 
     fn select_item(&mut self, item_id: u64) {
         self.selected_item = Some(item_id);
         if self.editing_item != Some(item_id) {
             let found = self.selected_list_ref().and_then(|list| {
-                list.item(item_id)
-                    .map(|item| (item.title.clone(), item.fields.clone()))
+                list.item(item_id).map(|item| {
+                    (
+                        item.title.clone(),
+                        item.fields.clone(),
+                        item.rating,
+                        item.note.clone(),
+                    )
+                })
             });
-            if let Some((title, fields)) = found {
+            if let Some((title, fields, rating, note)) = found {
                 self.edit_title = title;
                 self.edit_fields = fields;
+                self.edit_rating = rating;
+                self.edit_note = note;
                 self.editing_item = Some(item_id);
             }
         }
@@ -1040,7 +1384,16 @@ impl FaveApp {
             return;
         };
         ui.add_space(6.0);
-        ui.heading("Details");
+        ui.horizontal(|ui| {
+            ui.heading("Details");
+            if let Some(r) = item.rating {
+                ui.label(
+                    egui::RichText::new(format!("★ {r}/10"))
+                        .color(COL_ACCENT)
+                        .strong(),
+                );
+            }
+        });
         ui.separator();
         if let Some(cover) = &item.cover {
             if let Some(tex) = self.cover_texture(ui.ctx(), cover) {
@@ -1065,6 +1418,31 @@ impl FaveApp {
             let entry = self.edit_fields.entry(f.key.to_string()).or_default();
             ui.text_edit_singleline(entry);
         }
+        // Personal rating + note (v0.2 #5): saved through the same
+        // item.edit dispatch below, so both are undoable.
+        ui.label("Rating");
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(self.edit_rating.is_none(), "—")
+                .clicked()
+            {
+                self.edit_rating = None;
+            }
+            for r in 1..=10u8 {
+                if ui
+                    .selectable_label(self.edit_rating == Some(r), r.to_string())
+                    .clicked()
+                {
+                    self.edit_rating = Some(r);
+                }
+            }
+        });
+        ui.label("Note");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.edit_note)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
         ui.label(
             egui::RichText::new(format!("Source: {}", item.source))
                 .color(COL_MUTED)
@@ -1072,17 +1450,20 @@ impl FaveApp {
         );
         ui.add_space(6.0);
         if ui.button("Save changes").clicked() {
-            if let Some(l) = self.library.list_mut(list.id) {
-                if let Some(it) = l.item_mut(item_id) {
-                    it.title = self.edit_title.trim().to_string();
-                    it.fields = self
-                        .edit_fields
-                        .iter()
-                        .filter(|(_, v)| !v.trim().is_empty())
-                        .map(|(k, v)| (k.clone(), v.trim().to_string()))
-                        .collect();
-                }
-            }
+            // The registry applies the same trim/drop-empty normalisation
+            // this panel used to do inline.
+            let fields = serde_json::to_value(&self.edit_fields).unwrap_or_default();
+            let _ = self.dispatch(
+                "item.edit",
+                serde_json::json!({
+                    "list_id": list.id,
+                    "item_id": item_id,
+                    "title": self.edit_title.trim(),
+                    "fields": fields,
+                    "rating": self.edit_rating,
+                    "note": self.edit_note,
+                }),
+            );
             self.cover_textures.clear();
             self.persist();
             self.status = "Item updated.".to_string();
@@ -1091,9 +1472,10 @@ impl FaveApp {
             .button(egui::RichText::new("Remove from list").color(COL_ACCENT))
             .clicked()
         {
-            if let Some(l) = self.library.list_mut(list.id) {
-                l.remove_item(item_id);
-            }
+            let _ = self.dispatch(
+                "item.remove",
+                serde_json::json!({"list_id": list.id, "item_id": item_id}),
+            );
             self.selected_item = None;
             self.persist();
             self.status = "Item removed.".to_string();
@@ -1110,11 +1492,14 @@ impl FaveApp {
         let dest = self.store.covers_dir().join(&name);
         match std::fs::copy(path, &dest) {
             Ok(_) => {
-                if let Some(l) = self.library.list_mut(list_id) {
-                    if let Some(it) = l.item_mut(item_id) {
-                        it.cover = Some(name.clone());
-                    }
-                }
+                let _ = self.dispatch(
+                    "item.edit",
+                    serde_json::json!({
+                        "list_id": list_id,
+                        "item_id": item_id,
+                        "cover": name.clone(),
+                    }),
+                );
                 self.cover_textures.remove(&name);
                 self.persist();
                 self.status = "Cover replaced.".to_string();
@@ -1158,12 +1543,16 @@ impl FaveApp {
                         .add_enabled(can_create, egui::Button::new("Create list"))
                         .clicked()
                     {
-                        let id = self.library.new_list(
-                            self.new_list.name.trim().to_string(),
-                            self.new_list.category,
-                            self.new_list.ranked,
-                        );
-                        self.selected_list = Some(id);
+                        let params = serde_json::json!({
+                            "name": self.new_list.name.trim(),
+                            "category": self.new_list.category.id(),
+                            "ranked": self.new_list.ranked,
+                        });
+                        if let Ok(result) = self.dispatch("list.create", params) {
+                            if let Some(id) = result["list_id"].as_u64() {
+                                self.selected_list = Some(id);
+                            }
+                        }
                         self.selected_item = None;
                         self.new_list.open = false;
                         self.new_list.name.clear();
@@ -1225,36 +1614,38 @@ impl FaveApp {
                         .add_enabled(can_add, egui::Button::new("Add item"))
                         .clicked()
                     {
-                        let item_id = self.library.alloc_item_id();
-                        let mut item = Item::new(item_id, self.manual.title.trim().to_string());
-                        item.fields = self
-                            .manual
-                            .fields
-                            .iter()
-                            .filter(|(_, v)| !v.trim().is_empty())
-                            .map(|(k, v)| (k.clone(), v.trim().to_string()))
-                            .collect();
+                        // Field trim/drop-empty normalisation happens in
+                        // the registry, same as the detail panel's save.
+                        let fields = serde_json::to_value(&self.manual.fields).unwrap_or_default();
+                        let mut params = serde_json::json!({
+                            "list_id": list.id,
+                            "title": self.manual.title.trim(),
+                            "fields": fields,
+                        });
                         if let Some(cover_path) = self.manual.cover_path.clone() {
-                            let ext = cover_path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("jpg")
-                                .to_lowercase();
-                            let name = format!("cover-{item_id}.{ext}");
-                            if std::fs::copy(&cover_path, self.store.covers_dir().join(&name))
-                                .is_ok()
-                            {
-                                item.cover = Some(name);
+                            // A cover that can't be read is skipped, as
+                            // before (the item is added without it).
+                            if let Ok(bytes) = std::fs::read(&cover_path) {
+                                let ext = cover_path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("jpg")
+                                    .to_lowercase();
+                                params["cover_bytes_base64"] = serde_json::Value::String(
+                                    crate::commands::base64_encode(&bytes),
+                                );
+                                params["cover_ext"] = serde_json::Value::String(ext);
                             }
                         }
-                        if let Some(l) = self.library.list_mut(list.id) {
-                            match l.add_item(item) {
-                                crate::model::AddOutcome::Added => {
-                                    self.status = "Item added.".to_string();
-                                }
-                                crate::model::AddOutcome::Duplicate => {
-                                    self.status = "That item is already in this list.".to_string();
-                                }
+                        match self.dispatch("item.add", params) {
+                            Ok(r) if r["outcome"] == "duplicate" => {
+                                self.status = "That item is already in this list.".to_string();
+                            }
+                            Ok(_) => {
+                                self.status = "Item added.".to_string();
+                            }
+                            Err(e) => {
+                                self.status = format!("Could not add item: {e}");
                             }
                         }
                         self.manual.open = false;
@@ -1369,9 +1760,9 @@ impl FaveApp {
 
     fn open_text_export(&mut self, list: &FavList) {
         let remembered = self.settings.remembered_export_fields(list.category);
-        self.text_export.fields = list
-            .category
-            .fields()
+        // Category fields, then the #5 pseudo-fields (rating/note) — the
+        // same combined order `export_text::all_field_defs` renders in.
+        self.text_export.fields = crate::export_text::all_field_defs(list)
             .iter()
             .map(|f| {
                 (
@@ -1431,11 +1822,13 @@ impl FaveApp {
                                 .set_file_name(format!("{stem}.md"))
                                 .save_file()
                             {
-                                match crate::export_text::write_md(
-                                    &list,
-                                    &keys,
-                                    &path,
-                                    &self.store.covers_dir(),
+                                match self.dispatch(
+                                    "export.markdown",
+                                    serde_json::json!({
+                                        "list_id": list.id,
+                                        "fields": keys,
+                                        "path": path.to_string_lossy().into_owned(),
+                                    }),
                                 ) {
                                     Ok(_) => {
                                         self.status =
@@ -1450,8 +1843,15 @@ impl FaveApp {
                             .set_file_name(format!("{stem}.txt"))
                             .save_file()
                         {
-                            match crate::export_text::write_txt(&list, &keys, &path) {
-                                Ok(()) => {
+                            match self.dispatch(
+                                "export.text",
+                                serde_json::json!({
+                                    "list_id": list.id,
+                                    "fields": keys,
+                                    "path": path.to_string_lossy().into_owned(),
+                                }),
+                            ) {
+                                Ok(_) => {
                                     self.status = format!("Exported {} (text).", path.display());
                                 }
                                 Err(e) => {
@@ -1692,54 +2092,43 @@ impl FaveApp {
         if chosen.is_empty() {
             return;
         }
-        let images: Vec<Option<image::DynamicImage>> = chosen
-            .iter()
-            .map(|&i| {
-                list.items[i]
-                    .cover
-                    .as_ref()
-                    .and_then(|c| image::open(self.store.covers_dir().join(c)).ok())
-            })
-            .collect();
-        let missing =
-            render::missing_covers(&images.iter().map(|o| o.as_ref()).collect::<Vec<_>>());
-        if !missing.is_empty() {
-            // The dialog already warned; exporting with placeholders is the
-            // user's choice at this point.
-            self.image_export.message = format!(
-                "Note: {} item(s) have no cover and will be blank tiles.",
-                missing.len()
-            );
-        }
-        let aspects: Vec<f32> = chosen.iter().map(|&i| self.cover_aspect(list, i)).collect();
-        let (cw, ch) = layout::default_canvas(self.image_export.arrangement, chosen.len());
-        let placements = layout::layout(
-            self.image_export.arrangement,
-            &aspects,
-            cw as f32,
-            ch as f32,
-            14.0,
-        );
-        let covers_ref: Vec<Option<&image::DynamicImage>> =
-            images.iter().map(|o| o.as_ref()).collect();
-        let img = render::render(
-            &placements,
-            &covers_ref,
-            cw,
-            ch,
-            self.image_export.arrangement,
-            self.image_export.fit,
-        );
+        // Layout/render/encode now run inside the `export.image` command —
+        // the registry loads the same covers and uses the same per-category
+        // aspect defaults as this dialog's preview.
+        let item_ids: Vec<u64> = chosen.iter().map(|&i| list.items[i].id).collect();
         let ext = self.image_export.format.extension();
         let stem = crate::export_text::safe_file_stem(&list.name);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.{ext}"))
             .save_file()
         {
-            match render::encode(&img, self.image_export.format)
-                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
-            {
-                Ok(()) => {
+            let params = serde_json::json!({
+                "list_id": list.id,
+                "path": path.to_string_lossy().into_owned(),
+                "arrangement": arrangement_id(self.image_export.arrangement),
+                "format": match self.image_export.format {
+                    ImageFormat::Png => "png",
+                    ImageFormat::Jpeg => "jpg",
+                },
+                "fit": match self.image_export.fit {
+                    FitMode::CropFill => "crop_fill",
+                    FitMode::WholeCover => "whole_cover",
+                },
+                "item_ids": item_ids,
+            });
+            match self.dispatch("export.image", params) {
+                Ok(r) => {
+                    let missing = r["missing_indices"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    if missing > 0 {
+                        // The dialog already warned; exporting with
+                        // placeholders is the user's choice at this point.
+                        self.image_export.message = format!(
+                            "Note: {missing} item(s) have no cover and will be blank tiles."
+                        );
+                    }
                     self.status = format!("Exported image {}.", path.display());
                     self.image_export.open = false;
                 }
@@ -1812,13 +2201,27 @@ impl FaveApp {
                         .set_file_name("favelists-backup.zip")
                         .save_file()
                     {
-                        match crate::backup::export_backup(
-                            &self.library,
-                            &scope,
-                            &self.store.covers_dir(),
-                            &path,
+                        let scope_json = match &scope {
+                            BackupScope::SingleList(id) => {
+                                serde_json::json!({"kind": "single", "list_id": id})
+                            }
+                            BackupScope::SelectedLists(ids) => {
+                                serde_json::json!({"kind": "selected", "list_ids": ids})
+                            }
+                            BackupScope::WholeLibrary => serde_json::json!({"kind": "whole"}),
+                            BackupScope::Category(c) => {
+                                serde_json::json!({"kind": "category", "category": c.id()})
+                            }
+                        };
+                        match self.dispatch(
+                            "backup.export",
+                            serde_json::json!({
+                                "path": path.to_string_lossy().into_owned(),
+                                "scope": scope_json,
+                            }),
                         ) {
-                            Ok(n) => {
+                            Ok(r) => {
+                                let n = r["lists_written"].as_u64().unwrap_or(0);
                                 self.backup_ui.message =
                                     format!("Exported {n} list(s) to {}.", path.display());
                             }
@@ -1843,12 +2246,21 @@ impl FaveApp {
                         .add_filter("FaveLists backup", &["zip"])
                         .pick_file()
                     {
-                        match crate::backup::import_backup(
-                            &mut self.library,
-                            &self.store.covers_dir(),
-                            &path,
+                        match self.dispatch(
+                            "backup.import",
+                            serde_json::json!({"path": path.to_string_lossy().into_owned()}),
                         ) {
-                            Ok(report) => {
+                            Ok(r) => {
+                                let count = |k: &str| r[k].as_u64().unwrap_or(0) as usize;
+                                let report = ImportReport {
+                                    lists_added: count("lists_added"),
+                                    lists_merged: count("lists_merged"),
+                                    items_added: count("items_added"),
+                                    items_skipped_as_duplicates: count(
+                                        "items_skipped_as_duplicates",
+                                    ),
+                                    covers_written: count("covers_written"),
+                                };
                                 self.cover_textures.clear();
                                 self.persist();
                                 self.backup_ui.message = import_summary(&report);
