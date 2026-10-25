@@ -69,9 +69,9 @@ The compile pipeline lives in `tools/drinks-db/`.
 Grab the zip from the [latest release](https://github.com/SeanShaffer88/FaveLists/releases/latest).
 It contains two ways to run FaveLists (Windows 10/11, 64-bit):
 
-- **FaveLists-Setup-v0.1.0-x64.exe** — a per-user installer (no admin prompt).
+- **FaveLists-Setup-v0.1.1-x64.exe** — a per-user installer (no admin prompt).
   Installs for your account only and adds a Start menu entry.
-- **FaveLists-v0.1.0-portable.exe** — a single portable file. Put it anywhere
+- **FaveLists-v0.1.1-portable.exe** — a single portable file. Put it anywhere
   and double-click; the drinks database is built in, and your lists are
   stored in a `FaveListsData` folder next to the exe.
 
