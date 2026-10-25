@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test (full suite)
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --locked --release
+      - name: Stage portable exe and drinks pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/favelists.exe "dist/FaveLists-${{ github.ref_name }}-portable.exe"
+          Copy-Item data/drinks.json "dist/drinks.json"
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$version" installer\FaveLists.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Assemble release zip
+        shell: pwsh
+        run: |
+          $stage = "dist/ziproot"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "dist/FaveLists-Setup-${{ github.ref_name }}-x64.exe" $stage
+          Copy-Item "dist/FaveLists-${{ github.ref_name }}-portable.exe" $stage
+          Copy-Item LICENSE $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/FaveLists-${{ github.ref_name }}-windows-x64.zip"
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $lines = @()
+          foreach ($f in @("dist/FaveLists-${{ github.ref_name }}-windows-x64.zip", "dist/drinks.json")) {
+            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            $lines += "$hash  $(Split-Path $f -Leaf)"
+          }
+          $lines | Out-File -Encoding ascii dist/SHA256SUMS.txt
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/FaveLists-${{ github.ref_name }}-windows-x64.zip
+            dist/drinks.json
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
