@@ -1,0 +1,10 @@
+/target
+*.pdb
+# Local runtime data must never be committed (holds the user's API keys)
+/FaveListsData/
+favelists-location.json
+# Scratch downloads for the drinks-db pipeline
+/tmp-off/
+
+__pycache__/
+*.pyc

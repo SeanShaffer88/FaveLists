@@ -1,0 +1,46 @@
+[package]
+name = "favelists"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Sean Shaffer"]
+description = "FaveLists — build lists of your favorite movies, shows, books, music, games, podcasts, board games and drinks, with auto-fill details and cover art, and export them as text files or shareable cover-art images."
+license = "MIT"
+keywords = ["windows", "favorites", "lists", "movies", "music"]
+categories = ["gui"]
+
+[lib]
+name = "favelists"
+path = "src/lib.rs"
+
+[[bin]]
+name = "favelists"
+path = "src/main.rs"
+
+[[bin]]
+name = "drinks-db-build"
+path = "src/bin/drinks_db_build.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+egui = { version = "0.33", default-features = false, features = ["default_fonts"] }
+# Renderer: glow (OpenGL), deliberately NOT wgpu — same call as the rest of the
+# family (wgpu with no backend feature enabled panics on real Windows PCs).
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+# HTTP client. native-tls = Schannel on Windows, OpenSSL elsewhere; deliberately
+# NOT rustls/ring, whose build script needs MSVC tools when cross-checking the
+# windows-msvc target from Linux.
+ureq = { version = "2", default-features = false, features = ["json", "native-tls", "charset"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rfd = "0.15"
+
+[target.'cfg(not(windows))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit", "x11"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

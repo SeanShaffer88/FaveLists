@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<items total="2" termsofuse="https://boardgamegeek.com/wiki/page/Terms_Of_Use">
+  <item type="boardgame" id="174430">
+    <name type="primary" value="Gloomhaven" />
+    <yearpublished value="2017" />
+  </item>
+  <item type="boardgame" id="224517">
+    <name type="primary" value="Brass: Birmingham" />
+    <yearpublished value="2018" />
+  </item>
+</items>
