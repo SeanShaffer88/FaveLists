@@ -4,6 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Default drinks-database update source: the `drinks.json` asset on the
+/// latest FaveLists GitHub release.
+pub const DEFAULT_DRINKS_UPDATE_URL: &str =
+    "https://github.com/SeanShaffer88/FaveLists/releases/latest/download/drinks.json";
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -445,9 +450,10 @@ pub struct Settings {
     pub igdb_client_id: String,
     #[serde(default)]
     pub igdb_client_secret: String,
-    /// Where refreshed drinks-database packs come from. Empty = updates off
-    /// (no real update server exists yet; the code path is exercised by tests
-    /// against a local stub).
+    /// Where refreshed drinks-database packs come from. Defaults to the
+    /// `drinks.json` asset attached to every FaveLists GitHub release
+    /// (`releases/latest/download/drinks.json` always resolves to the newest
+    /// published pack). Users can point it elsewhere or blank it to disable.
     #[serde(default)]
     pub drinks_update_url: String,
     /// Silent auto-update of the drinks database (spec §6): on by default.
@@ -472,7 +478,7 @@ impl Default for Settings {
             tmdb_api_key: String::new(),
             igdb_client_id: String::new(),
             igdb_client_secret: String::new(),
-            drinks_update_url: String::new(),
+            drinks_update_url: DEFAULT_DRINKS_UPDATE_URL.to_string(),
             drinks_auto_update: true,
             drinks_last_check: 0,
             export_fields: BTreeMap::new(),

@@ -50,4 +50,8 @@ The app treats the bundled file as version N. A downloaded pack (same JSON
 shape) with a strictly higher version, placed/retrieved via the Settings
 "Update drinks database" flow, replaces it (stored as `drinks.json` in the
 data folder). Silent auto-update checks the configured URL at most once a
-day; no update server exists yet, so the URL ships empty.
+day. By default the URL points at the `drinks.json` asset attached to every
+FaveLists GitHub release, so the newest published pack is what gets fetched.
+To cut a newer pack: rebuild `data/drinks.json` with this pipeline, bump its
+`version`, and attach it to the next release (the release workflow does this
+automatically from the repo's `data/drinks.json`).

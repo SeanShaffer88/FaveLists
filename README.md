@@ -64,6 +64,24 @@ data, available under the Open Database License (ODbL). Product images are
 © their contributors, Creative Commons Attribution-ShareAlike (CC BY-SA).
 The compile pipeline lives in `tools/drinks-db/`.
 
+## Download
+
+Grab the zip from the [latest release](https://github.com/SeanShaffer88/FaveLists/releases/latest).
+It contains two ways to run FaveLists (Windows 10/11, 64-bit):
+
+- **FaveLists-Setup-v0.1.0-x64.exe** — a per-user installer (no admin prompt).
+  Installs for your account only and adds a Start menu entry.
+- **FaveLists-v0.1.0-portable.exe** — a single portable file. Put it anywhere
+  and double-click; the drinks database is built in, and your lists are
+  stored in a `FaveListsData` folder next to the exe.
+
+Both are **unsigned**, so Windows SmartScreen may warn on first run — choose
+"More info" → "Run anyway". Uninstalling keeps your `FaveListsData` folder,
+so your lists survive a reinstall. `SHA256SUMS.txt` on the release page
+lists the SHA-256 hashes of the release files. The release also carries a
+standalone `drinks.json` — that's the drinks-database pack the app's silent
+auto-update downloads, not something you need to handle yourself.
+
 ## Building
 
 Rust + egui. Storage is plain JSON files (library, settings) in the data

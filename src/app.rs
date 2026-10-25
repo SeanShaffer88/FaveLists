@@ -300,8 +300,7 @@ impl FaveApp {
         let url = self.settings.drinks_update_url.trim().to_string();
         if url.is_empty() {
             self.settings_ui.message =
-                "Set a drinks database URL first (no update server is configured by default)."
-                    .to_string();
+                "Set a drinks database URL first (the update URL is blank).".to_string();
             return;
         }
         let tx = self.tx.clone();
