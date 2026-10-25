@@ -39,29 +39,20 @@ jobs:
           }
           & $iscc "/DAppVersion=$version" installer\FaveLists.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Assemble release zip
+      - name: Assemble portable zip
         shell: pwsh
         run: |
-          $stage = "dist/ziproot"
+          $stage = "dist/portable-root"
           New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item "dist/FaveLists-Setup-${{ github.ref_name }}-x64.exe" $stage
           Copy-Item "dist/FaveLists-${{ github.ref_name }}-portable.exe" $stage
           Copy-Item LICENSE $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/FaveLists-${{ github.ref_name }}-windows-x64.zip"
-      - name: Checksums
-        shell: pwsh
-        run: |
-          $lines = @()
-          foreach ($f in @("dist/FaveLists-${{ github.ref_name }}-windows-x64.zip", "dist/drinks.json")) {
-            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
-            $lines += "$hash  $(Split-Path $f -Leaf)"
-          }
-          $lines | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          Copy-Item PORTABLE.txt $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/FaveLists-${{ github.ref_name }}-portable.zip"
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/FaveLists-${{ github.ref_name }}-windows-x64.zip
+            dist/FaveLists-Setup-${{ github.ref_name }}-x64.exe
+            dist/FaveLists-${{ github.ref_name }}-portable.zip
             dist/drinks.json
-            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
