@@ -45,4 +45,4 @@ Name: "{group}\FaveLists"; Filename: "{app}\favelists.exe"
 Name: "{autodesktop}\FaveLists"; Filename: "{app}\favelists.exe"; Tasks: desktopicon
 
 [Run]
-Name: "{app}\favelists.exe"; Description: "Launch FaveLists"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\favelists.exe"; Description: "Launch FaveLists"; Flags: nowait postinstall skipifsilent
