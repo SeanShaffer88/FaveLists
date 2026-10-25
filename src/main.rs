@@ -2,6 +2,10 @@
 //! to this executable (see `store`), so the base dir handed to the app is
 //! the executable's directory.
 
+// Windows GUI subsystem: without this, launching the app on Windows opens a
+// console window alongside the GUI (and closing that console kills the app).
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 fn main() -> eframe::Result<()> {
     let base_dir = favelists::store::exe_dir();
     let options = eframe::NativeOptions {
