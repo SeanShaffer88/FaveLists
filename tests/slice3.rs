@@ -639,8 +639,12 @@ fn merge_is_one_undo_step() {
 #[test]
 fn registry_includes_the_slice3_commands() {
     let names = commands::command_names();
-    // 29 through Slice 4; Slice 5 added export.share_card + import.csv.
-    assert_eq!(names.len(), 31);
+    // 29 through Slice 4; Slice 5 added export.share_card + import.csv;
+    // v0.3 Slice 1 added library.tags; v0.3 Slice 2 added library.view
+    // + library.pick; v0.3 Slice 3 added export.csv, export.library
+    // and import.paste; v0.3 Slice 4 added library.missing_covers;
+    // v0.3 Slice 6 added trash.list/restore/remove/empty.
+    assert_eq!(names.len(), 42);
     for expected in [
         "items.bulk_remove",
         "items.bulk_move",
