@@ -5,21 +5,38 @@
 
 pub mod app;
 pub mod app_bulk;
+pub mod app_covers;
+pub mod app_drinks;
+pub mod app_drop;
+pub mod app_import;
+pub mod app_meta;
+pub mod app_settings;
 pub mod app_share;
+pub mod app_trash;
+pub mod app_views;
+pub mod app_wizard;
+pub mod appearance;
+pub mod auto_backup;
 pub mod backup;
+pub mod barcode;
 pub mod commands;
 pub mod csv_import;
 pub mod drinks;
 pub mod duplicates;
+pub mod export_data;
 pub mod export_text;
 pub mod json_channel;
 pub mod layout;
 pub mod model;
+pub mod paste_import;
 pub mod providers;
 pub mod render;
 pub mod search;
 pub mod share_card;
 pub mod store;
+pub mod trash;
+pub mod update_check;
+pub mod views;
 
 /// Sent with every HTTP request, per API etiquette (MusicBrainz and Open
 /// Food Facts both require a descriptive User-Agent).

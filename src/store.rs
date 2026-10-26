@@ -20,6 +20,8 @@ pub const LIBRARY_FILE: &str = "library.json";
 pub const JOURNAL_FILE: &str = "library.journal.json";
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const COVERS_DIR: &str = "covers";
+/// Automatic backups (v0.3 #19) live here, under the data folder.
+pub const BACKUPS_DIR: &str = "backups";
 pub const DRINKS_FILE: &str = "drinks.json";
 const POINTER_FILE: &str = "favelists-location.json";
 
@@ -94,6 +96,10 @@ impl Store {
         self.data_dir.join(COVERS_DIR)
     }
 
+    pub fn backups_dir(&self) -> PathBuf {
+        self.data_dir.join(BACKUPS_DIR)
+    }
+
     pub fn library_path(&self) -> PathBuf {
         self.data_dir.join(LIBRARY_FILE)
     }
@@ -111,7 +117,9 @@ impl Store {
     }
 
     pub fn load_library(&self) -> io::Result<Library> {
-        load_json_or_default(&self.library_path())
+        let mut library = load_json_or_default(&self.library_path())?;
+        purge_trash(&mut library);
+        Ok(library)
     }
 
     /// Load the library, recovering from the autosave journal when the
@@ -125,11 +133,12 @@ impl Store {
         let mut main_error: Option<io::Error> = None;
         match fs::read_to_string(self.library_path()) {
             Ok(text) => match serde_json::from_str::<Library>(&text) {
-                Ok(library) => {
+                Ok(mut library) => {
+                    purge_trash(&mut library);
                     return Ok(LibraryLoad {
                         library,
                         recovered_from_journal: false,
-                    })
+                    });
                 }
                 Err(e) => {
                     main_error = Some(io::Error::new(io::ErrorKind::InvalidData, e));
@@ -140,7 +149,8 @@ impl Store {
         }
         // The main file is missing or unusable: try the journal.
         if let Ok(text) = fs::read_to_string(self.journal_path()) {
-            if let Ok(library) = serde_json::from_str::<Library>(&text) {
+            if let Ok(mut library) = serde_json::from_str::<Library>(&text) {
+                purge_trash(&mut library);
                 return Ok(LibraryLoad {
                     library,
                     recovered_from_journal: true,
@@ -197,6 +207,14 @@ impl Store {
         self.ensure_dirs()?;
         Ok(())
     }
+}
+
+/// Drop trash records past the 30-day retention window (v0.3 #10)
+/// at load time, so an expired record never comes back from disk.
+/// The drop persists on the next save; cover files are untouched
+/// (a copy of the item may share them).
+fn purge_trash(library: &mut Library) {
+    crate::trash::purge_expired(&mut library.trash, crate::model::now_unix());
 }
 
 fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::Result<T> {

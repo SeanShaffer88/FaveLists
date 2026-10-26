@@ -28,6 +28,17 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "FaveLists",
         options,
-        Box::new(|_cc| Ok(Box::new(favelists::app::FaveApp::new(base_dir)))),
+        Box::new(|cc| {
+            // Text size (v0.2.1's fixed larger text, generalised into
+            // the v0.3 #14 setting): the loaded setting's zoom factor
+            // scales every font and widget and — set here in the
+            // creation callback — is in effect before the first frame
+            // renders. A settings file from before the choice existed
+            // loads as Large, the old fixed 1.3x.
+            let app = favelists::app::FaveApp::new(base_dir);
+            cc.egui_ctx.set_zoom_factor(app.startup_zoom_factor());
+            cc.egui_ctx.set_visuals(app.startup_visuals());
+            Ok(Box::new(app))
+        }),
     )
 }

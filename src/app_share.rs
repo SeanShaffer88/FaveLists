@@ -1,6 +1,8 @@
 //! Share-card export + CSV import dialogs (v0.2 program #8 + #10) — a
 //! third `impl FaveApp` block, split out of `app.rs` for the same reason
-//! as `app_bulk.rs`: that file is near the publish-size ceiling.
+//! as `app_bulk.rs`: that file is near the publish-size ceiling. Since
+//! v0.3 Slice 2 (#3) the share-card dialog also serves smart views:
+//! same dialog, `view` param instead of `list_id`.
 //!
 //! Both dialogs only collect intent and dispatch through the command
 //! registry (`export.share_card`, `import.csv`), exactly like the rest
@@ -14,12 +16,15 @@ use crate::model::FavList;
 use eframe::egui;
 use std::path::PathBuf;
 
-/// Share-card dialog state: which list, and the entry-count choice
-/// (5 / 10 / 25, where 25 is labelled "All" — the card's maximum).
+/// Share-card dialog state: which list — or, since v0.3 Slice 2 (#3),
+/// which smart view (`view` set instead of a meaningful `list_id`) —
+/// and the entry-count choice (5 / 10 / 25, where 25 is labelled "All"
+/// — the card's maximum).
 #[derive(Default)]
 pub(crate) struct ShareCardState {
     pub open: bool,
     pub list_id: u64,
+    pub view: Option<crate::views::SmartView>,
     pub count: usize,
     pub message: String,
 }
@@ -45,6 +50,20 @@ impl FaveApp {
         self.share_ui = ShareCardState {
             open: true,
             list_id: list.id,
+            view: None,
+            count: 10,
+            message: String::new(),
+        };
+    }
+
+    /// Open the share-card dialog for a smart view (Slice 2 #3): same
+    /// dialog, but the card takes the view's entries in view order
+    /// under the view's name.
+    pub(crate) fn open_share_card_for_view(&mut self, view: crate::views::SmartView) {
+        self.share_ui = ShareCardState {
+            open: true,
+            list_id: 0,
+            view: Some(view),
             count: 10,
             message: String::new(),
         };
@@ -54,23 +73,38 @@ impl FaveApp {
         if !self.share_ui.open {
             return;
         }
-        let Some(list) = self.library.list(self.share_ui.list_id).cloned() else {
-            self.share_ui.open = false;
-            return;
+        // Resolve the card's source up front — a list (the original
+        // flow) or a smart view — into the three things the dialog
+        // renders: its display title, its entry total, and how many of
+        // the first `count` entries have no cover.
+        let (title, total, missing) = if let Some(view) = self.share_ui.view {
+            let entries = crate::views::view_items(&self.library, view);
+            let missing = entries
+                .iter()
+                .take(self.share_ui.count)
+                .filter(|e| e.item.cover.is_none())
+                .count();
+            (view.name().to_string(), entries.len(), missing)
+        } else {
+            let Some(list) = self.library.list(self.share_ui.list_id).cloned() else {
+                self.share_ui.open = false;
+                return;
+            };
+            let missing = list
+                .items
+                .iter()
+                .take(self.share_ui.count)
+                .filter(|i| i.cover.is_none())
+                .count();
+            (list.name.clone(), list.items.len(), missing)
         };
-        let chosen = self.share_ui.count.min(list.items.len());
-        let missing = list
-            .items
-            .iter()
-            .take(self.share_ui.count)
-            .filter(|i| i.cover.is_none())
-            .count();
+        let chosen = self.share_ui.count.min(total);
         let mut open = true;
         egui::Window::new("Share card")
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("A designed PNG of “{}” (1200×630):", list.name));
+                ui.label(format!("A designed PNG of “{}” (1200×630):", title));
                 ui.label(
                     egui::RichText::new(
                         "List name, rank numbers, covers, titles and years — \
@@ -99,20 +133,26 @@ impl FaveApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save PNG…").clicked() {
-                        let stem = crate::export_text::safe_file_stem(&list.name);
+                        let stem = crate::export_text::safe_file_stem(&title);
                         if let Some(path) = rfd::FileDialog::new()
                             .set_file_name(format!("{stem}-share.png"))
                             .add_filter("PNG image", &["png"])
                             .save_file()
                         {
-                            match self.dispatch(
-                                "export.share_card",
+                            let params = if let Some(view) = self.share_ui.view {
                                 serde_json::json!({
-                                    "list_id": list.id,
+                                    "view": view.id(),
                                     "path": path.to_string_lossy().into_owned(),
                                     "count": self.share_ui.count,
-                                }),
-                            ) {
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "list_id": self.share_ui.list_id,
+                                    "path": path.to_string_lossy().into_owned(),
+                                    "count": self.share_ui.count,
+                                })
+                            };
+                            match self.dispatch("export.share_card", params) {
                                 Ok(r) => {
                                     let n = r["entries"].as_u64().unwrap_or(0);
                                     let m = r["missing_indices"]

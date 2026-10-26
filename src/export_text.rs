@@ -12,11 +12,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The export pseudo-fields (v0.2 program #5): the per-entry personal
-/// rating and note. They are not category fields — they read from the item
-/// itself — and they always sort AFTER the category fields in the export
-/// checklist and the rendered document.
-pub const PSEUDO_FIELDS: [crate::model::FieldDef; 2] = [
+/// The export pseudo-fields: the per-entry personal rating and note
+/// (v0.2 program #5) and tags and status (v0.3 program #4/#5). They are
+/// not category fields — they read from the item itself — and they always
+/// sort AFTER the category fields in the export checklist and the
+/// rendered document.
+pub const PSEUDO_FIELDS: [crate::model::FieldDef; 4] = [
     crate::model::FieldDef {
         key: "rating",
         label: "Rating",
@@ -24,6 +25,14 @@ pub const PSEUDO_FIELDS: [crate::model::FieldDef; 2] = [
     crate::model::FieldDef {
         key: "note",
         label: "Note",
+    },
+    crate::model::FieldDef {
+        key: "tags",
+        label: "Tags",
+    },
+    crate::model::FieldDef {
+        key: "status",
+        label: "Status",
     },
 ];
 
@@ -75,6 +84,16 @@ fn item_lines(
                 let note = item.note.trim();
                 if !note.is_empty() {
                     lines.push(format!("Note: {note}"));
+                }
+            }
+            "tags" => {
+                if !item.tags.is_empty() {
+                    lines.push(format!("Tags: {}", item.tags.join(", ")));
+                }
+            }
+            "status" => {
+                if let Some(s) = item.status {
+                    lines.push(format!("Status: {}", s.id()));
                 }
             }
             _ => {

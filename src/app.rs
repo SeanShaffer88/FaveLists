@@ -17,30 +17,16 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
-// Colours (family palette)
+// Colours (family palette) — defined in `crate::appearance` since
+// v0.3 Slice 5 (the high-contrast variants live there too) and
+// re-exported so every `crate::app::COL_*` import keeps working.
 // ---------------------------------------------------------------------------
-pub const COL_BG: egui::Color32 = egui::Color32::from_rgb(0x10, 0x10, 0x10);
-pub const COL_PANEL: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x16);
-pub const COL_HAIRLINE: egui::Color32 = egui::Color32::from_rgb(0x24, 0x24, 0x24);
-pub const COL_ACCENT: egui::Color32 = egui::Color32::from_rgb(0xE5, 0x48, 0x4D);
-pub const COL_DEEP_RED: egui::Color32 = egui::Color32::from_rgb(0x6B, 0x07, 0x00);
-pub const COL_TEXT: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xF5, 0xF5);
-pub const COL_MUTED: egui::Color32 = egui::Color32::from_rgb(0xA8, 0xA8, 0xA8);
+pub use crate::appearance::{
+    COL_ACCENT, COL_BG, COL_DEEP_RED, COL_HAIRLINE, COL_MUTED, COL_PANEL, COL_TEXT,
+};
 
-pub fn install_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = COL_BG;
-    visuals.window_fill = COL_PANEL;
-    visuals.extreme_bg_color = egui::Color32::from_rgb(0x0A, 0x0A, 0x0A);
-    visuals.faint_bg_color = egui::Color32::from_rgb(0x1B, 0x1B, 0x1B);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0f32, COL_HAIRLINE);
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
-    visuals.widgets.hovered.bg_fill = COL_DEEP_RED;
-    visuals.widgets.active.bg_fill = COL_DEEP_RED;
-    visuals.selection.bg_fill = COL_DEEP_RED;
-    visuals.selection.stroke = egui::Stroke::new(1.0f32, COL_ACCENT);
-    visuals.hyperlink_color = COL_ACCENT;
-    ctx.set_visuals(visuals);
+pub fn install_theme(ctx: &egui::Context, high_contrast: bool) {
+    ctx.set_visuals(crate::appearance::visuals(high_contrast));
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +53,17 @@ enum BgMsg {
         cover_bytes: Option<Vec<u8>>,
     },
     DrinksUpdate(Result<String, String>),
+    /// An automatic or Settings-requested backup finished (v0.3
+    /// #19): Ok carries the file name written; `manual` marks the
+    /// "Back up now" button so the outcome also lands in the
+    /// Settings dialog's message line.
+    AutoBackup {
+        manual: bool,
+        result: Result<String, String>,
+    },
+    /// A newer release exists (v0.3 #18): the display version
+    /// ("v0.3.1") for the status-bar notice.
+    UpdateAvailable(String),
 }
 
 struct PendingAdd {
@@ -98,14 +95,14 @@ struct ManualState {
 }
 
 #[derive(Default)]
-struct SettingsState {
-    open: bool,
-    tmdb: String,
-    igdb_id: String,
-    igdb_secret: String,
-    drinks_url: String,
-    auto_update: bool,
-    message: String,
+pub(crate) struct SettingsState {
+    pub(crate) open: bool,
+    pub(crate) tmdb: String,
+    pub(crate) igdb_id: String,
+    pub(crate) igdb_secret: String,
+    pub(crate) drinks_url: String,
+    pub(crate) auto_update: bool,
+    pub(crate) message: String,
 }
 
 #[derive(Default)]
@@ -141,17 +138,17 @@ struct BackupState {
 // ---------------------------------------------------------------------------
 
 pub struct FaveApp {
-    base_dir: PathBuf,
-    store: Store,
+    pub(crate) base_dir: PathBuf,
+    pub(crate) store: Store,
     // `pub(crate)` on the fields `app_bulk.rs` (Slice 3) shares: it holds
     // the bulk-selection bar, the duplicates view, and the grid-drop
     // handling as a second `impl FaveApp` block.
     pub(crate) library: Library,
-    settings: Settings,
-    drinks: DrinksDb,
+    pub(crate) settings: Settings,
+    pub(crate) drinks: DrinksDb,
     pub(crate) selected_list: Option<u64>,
     pub(crate) selected_item: Option<u64>,
-    filter: String,
+    pub(crate) filter: String,
     pub(crate) status: String,
     // bulk selection + duplicates (v0.2 #9 / #3, see app_bulk.rs)
     pub(crate) bulk_selection: Vec<u64>,
@@ -162,7 +159,7 @@ pub struct FaveApp {
     // undo/redo (v0.2 #4): the session history the registry records into
     history: crate::commands::History,
     // global search (v0.2 #2)
-    global_query: String,
+    pub(crate) global_query: String,
     global_hits: Vec<crate::search::SearchHit>,
     /// The exact query the cached `global_hits` were computed for.
     global_hits_query: String,
@@ -181,20 +178,50 @@ pub struct FaveApp {
     // personal rating + note (v0.2 #5)
     edit_rating: Option<u8>,
     edit_note: String,
+    // tags + status (v0.3 #4/#5, see app_meta.rs)
+    pub(crate) edit_tags: String,
+    pub(crate) edit_status: Option<crate::model::ItemStatus>,
+    pub(crate) filter_tag: Option<String>,
+    pub(crate) filter_status: Option<crate::model::ItemStatus>,
     editing_item: Option<u64>,
     // textures
-    cover_textures: HashMap<String, egui::TextureHandle>,
+    pub(crate) cover_textures: HashMap<String, egui::TextureHandle>,
     thumb_textures: HashMap<String, egui::TextureHandle>,
     // dialogs
     new_list: NewListState,
     manual: ManualState,
-    settings_ui: SettingsState,
+    // settings dialog lives in app_settings.rs (v0.2.1 split)
+    pub(crate) settings_ui: SettingsState,
     text_export: TextExportState,
     image_export: ImageExportState,
     backup_ui: BackupState,
     // share card + CSV import (v0.2 #8 / #10, see app_share.rs)
     pub(crate) share_ui: crate::app_share::ShareCardState,
     pub(crate) csv_ui: crate::app_share::CsvImportState,
+    // library export + paste import (v0.3 #6 / #7, see app_import.rs)
+    pub(crate) library_export_ui: crate::app_import::LibraryExportState,
+    pub(crate) paste_ui: crate::app_import::PasteImportState,
+    // smart views + pick (v0.3 #2 / #3 / #1, see app_views.rs)
+    pub(crate) views: crate::app_views::ViewsState,
+    // drinks depth (v0.3 #11 barcode + #13 caffeine filter, app_drinks.rs)
+    pub(crate) barcode_ui: crate::app_drinks::BarcodeState,
+    pub(crate) filter_caffeine_min: String,
+    // missing-cover sweep (v0.3 #9, see app_covers.rs)
+    pub(crate) covers_ui: crate::app_covers::CoversState,
+    // trash view (v0.3 #10, see app_trash.rs)
+    pub(crate) trash_ui: crate::app_trash::TrashState,
+    // first-run setup wizard (v0.3 #20, see app_wizard.rs)
+    pub(crate) wizard: crate::app_wizard::WizardState,
+    // update check (v0.3 #18): the newer version once one is known
+    pub(crate) update_available: Option<String>,
+    update_check_started: bool,
+    // automatic backups (v0.3 #19): the launch check runs once
+    auto_backup_checked: bool,
+    // drop-a-cover targets (v0.3 #17, see app_drop.rs): the current
+    // list's per-item rects, recorded by the grid/rows each frame,
+    // and the list they belong to.
+    pub(crate) drop_targets: Vec<(u64, egui::Rect)>,
+    pub(crate) drop_list: Option<u64>,
     confirm_delete_list: Option<u64>,
     // background plumbing
     tx: Sender<BgMsg>,
@@ -209,12 +236,31 @@ impl FaveApp {
         let store = Store::open(&base_dir).unwrap_or_else(|_| {
             Store::open_at(&base_dir.join(crate::store::DATA_DIR_NAME)).expect("create data folder")
         });
+        // First-run detection (v0.3 #20): the wizard opens only when
+        // the data folder holds no trace of a previous run — no
+        // library file, no autosave journal, no settings file. A
+        // journal alone still counts as an existing install (it is
+        // the recovery copy of a real library). This is the signal
+        // the wizard's startup rule keys on.
+        let fresh_start = !store.library_path().exists()
+            && !store.journal_path().exists()
+            && !store.settings_path().exists();
         // Journal-recovering load (#4): a corrupt/missing main library file
         // falls back to the autosave journal, and the user is told.
         let load = store.load_library_recovering().unwrap_or_default();
         let recovered = load.recovered_from_journal;
         let library = load.library;
-        let settings = store.load_settings().unwrap_or_default();
+        let mut settings = store.load_settings().unwrap_or_default().sanitized();
+        let mut wizard = crate::app_wizard::WizardState::default();
+        if fresh_start {
+            wizard.open = true;
+        } else if !settings.wizard_done {
+            // An existing install predates the wizard (or a previous
+            // version set the flag nowhere): mark it done silently
+            // so it never opens unasked, and save just that.
+            settings.wizard_done = true;
+            let _ = store.save_settings(&settings);
+        }
         let drinks = DrinksDb::load_effective(&store.data_dir);
         let (tx, rx) = channel();
         FaveApp {
@@ -251,6 +297,10 @@ impl FaveApp {
             edit_fields: BTreeMap::new(),
             edit_rating: None,
             edit_note: String::new(),
+            edit_tags: String::new(),
+            edit_status: None,
+            filter_tag: None,
+            filter_status: None,
             editing_item: None,
             cover_textures: HashMap::new(),
             thumb_textures: HashMap::new(),
@@ -262,6 +312,19 @@ impl FaveApp {
             backup_ui: BackupState::default(),
             share_ui: crate::app_share::ShareCardState::default(),
             csv_ui: crate::app_share::CsvImportState::default(),
+            library_export_ui: crate::app_import::LibraryExportState::default(),
+            paste_ui: crate::app_import::PasteImportState::default(),
+            views: crate::app_views::ViewsState::default(),
+            barcode_ui: crate::app_drinks::BarcodeState::default(),
+            filter_caffeine_min: String::new(),
+            covers_ui: crate::app_covers::CoversState::default(),
+            trash_ui: crate::app_trash::TrashState::default(),
+            wizard,
+            update_available: None,
+            update_check_started: false,
+            auto_backup_checked: false,
+            drop_targets: Vec::new(),
+            drop_list: None,
             confirm_delete_list: None,
             tx,
             rx,
@@ -269,6 +332,17 @@ impl FaveApp {
             drag_source: None,
             drinks_check_started: false,
         }
+    }
+
+    /// Startup appearance (v0.3 #14/#16), read by `main.rs` in the
+    /// creation callback so the first frame already renders at the
+    /// remembered text size and contrast.
+    pub fn startup_zoom_factor(&self) -> f32 {
+        self.settings.text_size.factor()
+    }
+
+    pub fn startup_visuals(&self) -> egui::Visuals {
+        crate::appearance::visuals(self.settings.high_contrast)
     }
 
     pub(crate) fn persist(&mut self) {
@@ -304,7 +378,11 @@ impl FaveApp {
 
     // -- covers -------------------------------------------------------------
 
-    fn cover_texture(&mut self, ctx: &egui::Context, cover: &str) -> Option<egui::TextureHandle> {
+    pub(crate) fn cover_texture(
+        &mut self,
+        ctx: &egui::Context,
+        cover: &str,
+    ) -> Option<egui::TextureHandle> {
         if let Some(t) = self.cover_textures.get(cover) {
             return Some(t.clone());
         }
@@ -358,7 +436,7 @@ impl FaveApp {
         self.start_drinks_update();
     }
 
-    fn start_drinks_update(&mut self) {
+    pub(crate) fn start_drinks_update(&mut self) {
         let url = self.settings.drinks_update_url.trim().to_string();
         if url.is_empty() {
             self.settings_ui.message =
@@ -446,8 +524,79 @@ impl FaveApp {
                     }
                     self.persist();
                 }
+                BgMsg::AutoBackup { manual, result } => match result {
+                    Ok(name) => {
+                        self.status = format!("Auto-backup saved ({name}).");
+                        if manual {
+                            self.settings_ui.message = format!("Backup saved ({name}).");
+                        }
+                    }
+                    Err(e) => {
+                        self.status = format!("Backup failed: {e}");
+                        if manual {
+                            self.settings_ui.message = format!("Backup failed: {e}");
+                        }
+                    }
+                },
+                BgMsg::UpdateAvailable(version) => {
+                    self.update_available = Some(version);
+                }
             }
         }
+    }
+
+    // -- automatic backups + update check (v0.3 #19 + #18) ---------------
+
+    /// Once per launch: if automatic backups are on and the newest
+    /// one is a week old (or there is none), take one in the
+    /// background. JSON-channel sessions never run this — backups
+    /// are a GUI-launch behaviour.
+    fn maybe_start_auto_backup(&mut self) {
+        if self.auto_backup_checked {
+            return;
+        }
+        self.auto_backup_checked = true;
+        if !self.settings.auto_backups {
+            return;
+        }
+        let dir = self.store.backups_dir();
+        let newest = crate::auto_backup::newest_auto_backup_time(&dir);
+        if crate::auto_backup::is_due(crate::model::now_unix(), newest) {
+            self.spawn_backup(false);
+        }
+    }
+
+    /// Take a backup now on a background thread (the write + the
+    /// rotation live in `auto_backup`); shared by the launch check
+    /// (`manual = false`) and Settings' "Back up now" (`true`).
+    pub(crate) fn spawn_backup(&mut self, manual: bool) {
+        let tx = self.tx.clone();
+        let library = self.library.clone();
+        let covers = self.store.covers_dir();
+        let dir = self.store.backups_dir();
+        std::thread::spawn(move || {
+            let result = crate::auto_backup::write_auto_backup(&library, &covers, &dir);
+            let _ = tx.send(BgMsg::AutoBackup { manual, result });
+        });
+    }
+
+    /// Once per launch: quietly ask the releases page whether a
+    /// newer version exists. Any failure (offline, rate limit,
+    /// junk payload) sends nothing — the app stays silent.
+    fn maybe_start_update_check(&mut self) {
+        if self.update_check_started {
+            return;
+        }
+        self.update_check_started = true;
+        if !self.settings.check_for_updates {
+            return;
+        }
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            if let Some(version) = crate::update_check::fetch_newer_version() {
+                let _ = tx.send(BgMsg::UpdateAvailable(version));
+            }
+        });
     }
 
     fn apply_pending_add(&mut self, list_id: u64, pending: PendingAdd) {
@@ -682,8 +831,10 @@ const TILE_H: f32 = 207.0;
 
 impl eframe::App for FaveApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        install_theme(ctx);
+        install_theme(ctx, self.settings.high_contrast);
         self.maybe_start_drinks_auto_update();
+        self.maybe_start_auto_backup();
+        self.maybe_start_update_check();
         self.poll_background();
         self.maybe_fire_search(ctx);
         self.handle_shortcuts(ctx);
@@ -702,6 +853,14 @@ impl eframe::App for FaveApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.status).color(COL_MUTED));
+                // Update check (v0.3 #18): once a newer release is
+                // known, a quiet link sits next to the status text.
+                if let Some(version) = &self.update_available {
+                    ui.hyperlink_to(
+                        format!("{version} available ↗"),
+                        crate::update_check::RELEASES_PAGE_URL,
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(format!(
@@ -722,10 +881,20 @@ impl eframe::App for FaveApp {
                 self.duplicates_ui(ui);
             } else if self.global_search_active() {
                 self.global_results_ui(ui);
+            } else if self.covers_ui.open {
+                self.missing_covers_ui(ui);
+            } else if self.trash_ui.open {
+                self.trash_view_ui(ui);
+            } else if self.views.active.is_some() {
+                self.smart_view_ui(ui);
             } else {
                 self.main_ui(ui);
             }
         });
+
+        // Drop-a-cover (v0.3 #17, app_drop.rs): after the central
+        // panel, so this frame's grid/rows drop targets are fresh.
+        self.handle_cover_drop(ctx);
 
         self.new_list_dialog(ctx);
         self.manual_dialog(ctx);
@@ -735,6 +904,11 @@ impl eframe::App for FaveApp {
         self.backup_dialog(ctx);
         self.share_card_dialog(ctx);
         self.csv_import_dialog(ctx);
+        self.library_export_dialog(ctx);
+        self.paste_import_dialog(ctx);
+        self.barcode_dialog(ctx);
+        self.pick_dialog(ctx);
+        self.wizard_dialog(ctx);
         if self.searching || self.pending_add {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -944,8 +1118,14 @@ impl FaveApp {
             self.backup_ui.selected = self.library.lists.iter().map(|l| (l.id, false)).collect();
             self.backup_ui.message.clear();
         }
+        if ui.button("⇪ Export library…").clicked() {
+            self.open_library_export();
+        }
         if ui.button("⇩ Import CSV…").clicked() {
             self.open_csv_import();
+        }
+        if ui.button("⇩ Paste a list…").clicked() {
+            self.open_paste_import();
         }
         // Global search (#2): searches every list via the library.search
         // command; results replace the main area while the query is active.
@@ -958,6 +1138,9 @@ impl FaveApp {
             search_resp.request_focus();
             self.global_focus_request = false;
         }
+        ui.separator();
+        // Smart views (v0.3 #2 + #1, see app_views.rs).
+        self.smart_views_sidebar(ui);
         ui.separator();
         // Record this frame's list-row rects so a grid drag released over
         // a row can drop the item onto that list (#9, see app_bulk.rs).
@@ -977,6 +1160,9 @@ impl FaveApp {
                         if resp.clicked() {
                             self.selected_list = Some(list.id);
                             self.selected_item = None;
+                            self.views.active = None;
+                            self.covers_ui.open = false;
+                            self.trash_ui.open = false;
                             self.bulk_selection.clear();
                             self.filter.clear();
                         }
@@ -1048,14 +1234,47 @@ impl FaveApp {
             if ui.button("Sort by rating").clicked() {
                 self.sort_list(list_id, SortKind::Rating);
             }
+            if list.category.drinks_kind().is_some() && ui.button("Sort by caffeine").clicked() {
+                self.sort_list(list_id, SortKind::Caffeine);
+            }
             if ui.button("Export text…").clicked() {
                 self.open_text_export(&list);
+            }
+            if ui.button("Export CSV…").clicked() {
+                let stem = crate::export_text::safe_file_stem(&list.name);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name(format!("{stem}.csv"))
+                    .add_filter("CSV", &["csv"])
+                    .save_file()
+                {
+                    match self.dispatch(
+                        "export.csv",
+                        serde_json::json!({
+                            "list_id": list.id,
+                            "path": path.to_string_lossy().into_owned(),
+                        }),
+                    ) {
+                        Ok(r) => {
+                            self.status =
+                                format!("Exported {} ({} rows, CSV).", path.display(), r["rows"]);
+                        }
+                        Err(e) => {
+                            self.status = format!("Export failed: {e}");
+                        }
+                    }
+                }
             }
             if ui.button("Export image…").clicked() {
                 self.open_image_export(&list);
             }
             if ui.button("Share card…").clicked() {
                 self.open_share_card(&list);
+            }
+            if ui.button("🎲 Pick for me").clicked() {
+                self.pick_from_list(&list);
+            }
+            if list.category.drinks_kind().is_some() && ui.button("Add by barcode…").clicked() {
+                self.open_barcode(list_id);
             }
             if self.confirm_delete_list == Some(list_id) {
                 if ui
@@ -1118,6 +1337,14 @@ impl FaveApp {
             // items in/out of the bulk selection; Ctrl+click toggles in
             // either mode. The bulk action bar appears in app_bulk.rs.
             ui.toggle_value(&mut self.select_mode, "☑ Select");
+            // Rows/grid quick toggle (v0.3 #15): the same remembered
+            // setting the Settings dialog's Appearance section edits.
+            if ui
+                .toggle_value(&mut self.settings.rows_view, "☰ Rows")
+                .changed()
+            {
+                self.persist();
+            }
             if !self.bulk_selection.is_empty() {
                 ui.label(
                     egui::RichText::new(format!("{} selected", self.bulk_selection.len()))
@@ -1126,6 +1353,12 @@ impl FaveApp {
                 );
             }
         });
+        // Tag + status filters (v0.3 #4/#5, app_meta.rs), applied on
+        // top of the title filter by the grid.
+        self.meta_filter_ui(ui, list.category);
+        // Drinks header extras (v0.3 #12/#13, app_drinks.rs): tried
+        // progress + the caffeine filter. No-op for other categories.
+        self.drinks_filter_ui(ui, &list);
         // Drop bulk-selected ids that are no longer in this list (the
         // items were removed, merged away, or undone since selecting).
         self.bulk_selection
@@ -1139,7 +1372,16 @@ impl FaveApp {
             );
             return;
         }
-        self.grid_ui(ui, &list);
+        // Drop-a-cover targets (v0.3 #17): the grid/rows rendering
+        // below records this list's per-item rects for the drop
+        // handler that runs after the central panel.
+        self.drop_list = Some(list_id);
+        self.drop_targets.clear();
+        if self.settings.rows_view {
+            self.rows_ui(ui, &list);
+        } else {
+            self.grid_ui(ui, &list);
+        }
     }
 
     fn sort_list(&mut self, list_id: u64, kind: SortKind) {
@@ -1148,6 +1390,7 @@ impl FaveApp {
             SortKind::Year => "year",
             SortKind::DateAdded => "added",
             SortKind::Rating => "rating",
+            SortKind::Caffeine => "caffeine",
         };
         let _ = self.dispatch(
             "list.sort",
@@ -1215,16 +1458,36 @@ impl FaveApp {
         }
     }
 
-    fn grid_ui(&mut self, ui: &mut egui::Ui, list: &FavList) {
+    /// The items the grid/rows show: the title filter on top of the
+    /// tag/status filters (#4/#5) and the caffeine filter (#13).
+    /// Shared by both presentations (v0.3 #15) so they never disagree
+    /// about what a list contains.
+    fn visible_indices(&self, list: &FavList) -> Vec<usize> {
         let filter = self.filter.trim().to_lowercase();
-        let visible: Vec<usize> = list
-            .items
+        list.items
             .iter()
             .enumerate()
             .filter(|(_, it)| filter.is_empty() || it.title.to_lowercase().contains(&filter))
+            .filter(|(_, it)| self.passes_meta_filters(it))
+            .filter(|(_, it)| self.passes_caffeine_filter(it))
             .map(|(i, _)| i)
-            .collect();
-        let cols = ((ui.available_width() / (TILE_W + 10.0)) as usize).max(1);
+            .collect()
+    }
+
+    fn grid_ui(&mut self, ui: &mut egui::Ui, list: &FavList) {
+        let visible = self.visible_indices(list);
+        // Cover size (v0.3 #15): the remembered scale multiplies the
+        // base tile size; 1.0 is exactly the pre-slice layout.
+        let tile_w = TILE_W * self.settings.cover_scale;
+        let tile_h = TILE_H * self.settings.cover_scale;
+        let cols = ((ui.available_width() / (tile_w + 10.0)) as usize).max(1);
+        // While files hover the window, the tile under the pointer is
+        // the drop-a-cover target (v0.3 #17): highlight it live.
+        let drop_hover_pos = if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
+            ui.ctx().input(|i| i.pointer.hover_pos())
+        } else {
+            None
+        };
         let mut clicked: Option<u64> = None;
         let mut toggled: Option<u64> = None;
         // Ctrl+click toggles bulk selection in any mode; in Select mode
@@ -1238,7 +1501,7 @@ impl FaveApp {
                         let item = &list.items[idx];
                         ui.vertical(|ui| {
                             let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(TILE_W, TILE_H),
+                                egui::vec2(tile_w, tile_h),
                                 egui::Sense::click_and_drag(),
                             );
                             tile_rects.push((idx, rect));
@@ -1293,6 +1556,14 @@ impl FaveApp {
                                     egui::StrokeKind::Inside,
                                 );
                             }
+                            if drop_hover_pos.map(|p| rect.contains(p)).unwrap_or(false) {
+                                painter.rect_stroke(
+                                    rect,
+                                    4.0,
+                                    egui::Stroke::new(3.0f32, COL_ACCENT),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                             if self.bulk_selection.contains(&item.id) {
                                 painter.rect_stroke(
                                     rect,
@@ -1329,7 +1600,7 @@ impl FaveApp {
                                 item.title.clone()
                             };
                             ui.add_sized(
-                                egui::vec2(TILE_W, 18.0),
+                                egui::vec2(tile_w, 18.0),
                                 egui::Label::new(egui::RichText::new(title).small())
                                     .halign(egui::Align::Center),
                             );
@@ -1344,12 +1615,154 @@ impl FaveApp {
         if let Some(id) = clicked {
             self.select_item(id);
         }
+        // Record this frame's drop-a-cover targets (v0.3 #17).
+        self.drop_targets = tile_rects
+            .iter()
+            .map(|(idx, rect)| (list.items[*idx].id, *rect))
+            .collect();
         // Drag release: reorder within the grid, or drag-to-list onto a
         // sidebar row — both live in app_bulk.rs (#9).
         self.grid_drop(ui, list, &tile_rects);
     }
 
-    fn select_item(&mut self, item_id: u64) {
+    /// Compact rows view (v0.3 #15): the same visible items as the
+    /// grid, one painter row each in the smart-view/search house
+    /// style — cover thumb or initial tile, title + year, the ★
+    /// rating and the status label on the right. Clicks select (or
+    /// toggle, under the grid's click rules); rows are drop-a-cover
+    /// targets just like tiles (#17).
+    fn rows_ui(&mut self, ui: &mut egui::Ui, list: &FavList) {
+        let visible = self.visible_indices(list);
+        let toggle_clicks = self.select_mode || ui.ctx().input(|i| i.modifiers.ctrl);
+        let drop_hover_pos = if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
+            ui.ctx().input(|i| i.pointer.hover_pos())
+        } else {
+            None
+        };
+        let mut clicked: Option<u64> = None;
+        let mut toggled: Option<u64> = None;
+        let mut targets: Vec<(u64, egui::Rect)> = Vec::new();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for &idx in &visible {
+                let item = &list.items[idx];
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 46.0),
+                    egui::Sense::click(),
+                );
+                targets.push((item.id, rect));
+                let painter = ui.painter_at(rect);
+                if resp.hovered() || drop_hover_pos.map(|p| rect.contains(p)).unwrap_or(false) {
+                    painter.rect_filled(rect, 4.0, COL_PANEL);
+                }
+                if self.selected_item == Some(item.id) || self.bulk_selection.contains(&item.id) {
+                    painter.rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(2.0f32, COL_ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let thumb = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(4.0, 3.0),
+                    egui::vec2(27.0, 40.0),
+                );
+                let tex = item
+                    .cover
+                    .as_deref()
+                    .and_then(|c| self.cover_texture(ui.ctx(), c));
+                match tex {
+                    Some(tex) => {
+                        painter.image(
+                            tex.id(),
+                            thumb,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    None => {
+                        painter.rect_filled(thumb, 3.0, COL_PANEL);
+                        painter.rect_stroke(
+                            thumb,
+                            3.0,
+                            egui::Stroke::new(1.0f32, COL_HAIRLINE),
+                            egui::StrokeKind::Inside,
+                        );
+                        let initial = item
+                            .title
+                            .trim()
+                            .chars()
+                            .next()
+                            .map(|c| c.to_uppercase().collect::<String>())
+                            .unwrap_or_else(|| "?".to_string());
+                        painter.text(
+                            thumb.center(),
+                            egui::Align2::CENTER_CENTER,
+                            initial,
+                            egui::FontId::proportional(14.0),
+                            COL_MUTED,
+                        );
+                    }
+                }
+                let year = list
+                    .category
+                    .year_key()
+                    .and_then(|k| item.field(k))
+                    .filter(|y| !y.trim().is_empty());
+                let mut title = match year {
+                    Some(y) => format!("{} ({})", item.title, y),
+                    None => item.title.clone(),
+                };
+                if list.ranked {
+                    title = format!("#{} {title}", idx + 1);
+                }
+                painter.text(
+                    egui::pos2(thumb.max.x + 10.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    title,
+                    egui::FontId::proportional(14.0),
+                    COL_TEXT,
+                );
+                // Right side: status label, then the rating.
+                let mut right_x = rect.max.x - 8.0;
+                if let Some(r) = item.rating {
+                    let text = format!("★ {r}");
+                    painter.text(
+                        egui::pos2(right_x, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        &text,
+                        egui::FontId::proportional(14.0),
+                        COL_ACCENT,
+                    );
+                    right_x -= 44.0;
+                }
+                if let Some(status) = item.status {
+                    painter.text(
+                        egui::pos2(right_x, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        status.label_for(list.category),
+                        egui::FontId::proportional(12.0),
+                        COL_MUTED,
+                    );
+                }
+                if resp.clicked() {
+                    if toggle_clicks {
+                        toggled = Some(item.id);
+                    } else {
+                        clicked = Some(item.id);
+                    }
+                }
+            }
+        });
+        if let Some(id) = toggled {
+            self.toggle_bulk(id);
+        }
+        if let Some(id) = clicked {
+            self.select_item(id);
+        }
+        self.drop_targets = targets;
+    }
+
+    pub(crate) fn select_item(&mut self, item_id: u64) {
         self.selected_item = Some(item_id);
         if self.editing_item != Some(item_id) {
             let found = self.selected_list_ref().and_then(|list| {
@@ -1359,14 +1772,18 @@ impl FaveApp {
                         item.fields.clone(),
                         item.rating,
                         item.note.clone(),
+                        item.tags.join(", "),
+                        item.status,
                     )
                 })
             });
-            if let Some((title, fields, rating, note)) = found {
+            if let Some((title, fields, rating, note, tags, status)) = found {
                 self.edit_title = title;
                 self.edit_fields = fields;
                 self.edit_rating = rating;
                 self.edit_note = note;
+                self.edit_tags = tags;
+                self.edit_status = status;
                 self.editing_item = Some(item_id);
             }
         }
@@ -1443,6 +1860,13 @@ impl FaveApp {
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
+        // Tags + status (v0.3 #4/#5): the editor/picker lives in
+        // app_meta.rs; both save through the dispatch below.
+        self.item_meta_ui(ui, list.category);
+        // One-click "Tried it" toggle for drinks (v0.3 #12,
+        // app_drinks.rs); renders nothing for other categories. It
+        // dispatches its own item.edit, separate from the Save below.
+        self.drink_tried_toggle_ui(ui, list.id, list.category, item_id, item.status);
         ui.label(
             egui::RichText::new(format!("Source: {}", item.source))
                 .color(COL_MUTED)
@@ -1451,9 +1875,15 @@ impl FaveApp {
         ui.add_space(6.0);
         if ui.button("Save changes").clicked() {
             // The registry applies the same trim/drop-empty normalisation
-            // this panel used to do inline.
+            // this panel used to do inline — and the tag rules (dedupe,
+            // sort, limits), whose rejection is surfaced, not swallowed:
+            // a bad tag must not report "Item updated." for a save that
+            // never happened.
             let fields = serde_json::to_value(&self.edit_fields).unwrap_or_default();
-            let _ = self.dispatch(
+            // The status id string, or null to clear (serde_json maps
+            // the None to null, which is the command's clear signal).
+            let status_param = self.edit_status.map(|s| s.id());
+            let result = self.dispatch(
                 "item.edit",
                 serde_json::json!({
                     "list_id": list.id,
@@ -1462,11 +1892,20 @@ impl FaveApp {
                     "fields": fields,
                     "rating": self.edit_rating,
                     "note": self.edit_note,
+                    "tags": self.edit_tags_param(),
+                    "status": status_param,
                 }),
             );
-            self.cover_textures.clear();
-            self.persist();
-            self.status = "Item updated.".to_string();
+            match result {
+                Ok(_) => {
+                    self.cover_textures.clear();
+                    self.persist();
+                    self.status = "Item updated.".to_string();
+                }
+                Err(e) => {
+                    self.status = format!("Could not save changes: {e}");
+                }
+            }
         }
         if ui
             .button(egui::RichText::new("Remove from list").color(COL_ACCENT))
@@ -1478,7 +1917,7 @@ impl FaveApp {
             );
             self.selected_item = None;
             self.persist();
-            self.status = "Item removed.".to_string();
+            self.status = "Moved to Trash.".to_string();
         }
     }
 
@@ -1661,107 +2100,11 @@ impl FaveApp {
         }
     }
 
-    fn settings_dialog(&mut self, ctx: &egui::Context) {
-        if !self.settings_ui.open {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .resizable(false)
-            .default_width(460.0)
-            .show(ctx, |ui| {
-                ui.heading("API keys");
-                ui.label(
-                    egui::RichText::new(
-                        "Your own free keys. They are stored only in the data folder on this PC.",
-                    )
-                    .color(COL_MUTED)
-                    .small(),
-                );
-                ui.label("TMDB API key (v3) — movies & TV shows");
-                ui.add(egui::TextEdit::singleline(&mut self.settings_ui.tmdb).password(true));
-                ui.label("Twitch Client ID — video games (IGDB)");
-                ui.text_edit_singleline(&mut self.settings_ui.igdb_id);
-                ui.label("Twitch Client Secret");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_ui.igdb_secret).password(true),
-                );
-                ui.separator();
-                ui.heading("Data");
-                ui.label(
-                    egui::RichText::new(format!("Data folder: {}", self.store.data_dir.display()))
-                        .small(),
-                );
-                if ui.button("Move data folder…").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        match self.store.relocate(&self.base_dir, &dir) {
-                            Ok(()) => {
-                                self.cover_textures.clear();
-                                self.status =
-                                    format!("Data moved to {}.", self.store.data_dir.display());
-                            }
-                            Err(e) => {
-                                self.settings_ui.message =
-                                    format!("Could not move data folder: {e}");
-                            }
-                        }
-                    }
-                }
-                ui.separator();
-                ui.heading("Drinks database");
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Bundled pack v{} · {} energy drinks · {} sodas (Open Food Facts, ODbL)",
-                        self.drinks.version,
-                        self.drinks.count(crate::drinks::DrinkKind::EnergyDrink),
-                        self.drinks.count(crate::drinks::DrinkKind::Soda),
-                    ))
-                    .small(),
-                );
-                ui.label("Update URL (leave empty until an update server exists)");
-                ui.text_edit_singleline(&mut self.settings_ui.drinks_url);
-                ui.checkbox(&mut self.settings_ui.auto_update, "Silently auto-update");
-                if ui.button("Update drinks database now").clicked() {
-                    // Save the URL first so the update uses what's on screen.
-                    self.settings.drinks_update_url =
-                        self.settings_ui.drinks_url.trim().to_string();
-                    self.settings.drinks_auto_update = self.settings_ui.auto_update;
-                    self.persist();
-                    self.start_drinks_update();
-                    self.settings_ui.message = "Checking for a drinks database update…".to_string();
-                }
-                if !self.settings_ui.message.is_empty() {
-                    ui.label(egui::RichText::new(&self.settings_ui.message).small());
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Save settings").clicked() {
-                        self.settings.tmdb_api_key = self.settings_ui.tmdb.trim().to_string();
-                        self.settings.igdb_client_id = self.settings_ui.igdb_id.trim().to_string();
-                        self.settings.igdb_client_secret =
-                            self.settings_ui.igdb_secret.trim().to_string();
-                        self.settings.drinks_update_url =
-                            self.settings_ui.drinks_url.trim().to_string();
-                        self.settings.drinks_auto_update = self.settings_ui.auto_update;
-                        self.persist();
-                        self.settings_ui.open = false;
-                        self.status = "Settings saved.".to_string();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.settings_ui.open = false;
-                    }
-                });
-            });
-        if !open {
-            self.settings_ui.open = false;
-        }
-    }
-
     fn open_text_export(&mut self, list: &FavList) {
         let remembered = self.settings.remembered_export_fields(list.category);
-        // Category fields, then the #5 pseudo-fields (rating/note) — the
-        // same combined order `export_text::all_field_defs` renders in.
+        // Category fields, then the pseudo-fields (rating/note/tags/
+        // status) — the same combined order `export_text::all_field_defs`
+        // renders in.
         self.text_export.fields = crate::export_text::all_field_defs(list)
             .iter()
             .map(|f| {
@@ -2284,7 +2627,7 @@ impl FaveApp {
     }
 }
 
-fn import_summary(r: &ImportReport) -> String {
+pub(crate) fn import_summary(r: &ImportReport) -> String {
     format!(
         "Import done: {} list(s) added, {} merged, {} item(s) added, {} duplicate(s) skipped, {} cover(s) restored.",
         r.lists_added, r.lists_merged, r.items_added, r.items_skipped_as_duplicates, r.covers_written

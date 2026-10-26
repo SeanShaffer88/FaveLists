@@ -19,6 +19,37 @@
 //! `import.csv`. The registry is the frozen interface those slices
 //! build on.
 //!
+//! The v0.3 program's Slice 1 (#4 tags + #5 status) extends `item.add`/
+//! `item.edit` with `tags`/`status` params, adds `tag`/`status` filters
+//! to `list.query`/`library.search`, and registers `library.tags`.
+//! Slice 2 (#2 smart views, #3 share card for views, #1 Pick for me)
+//! registers `library.view` + `library.pick` and lets
+//! `export.share_card` take a smart `view` instead of a `list_id`; the
+//! view computation and the seeded picker live in `views`.
+//!
+//! The v0.3 program's Slice 3 (#6 CSV + JSON export, #7 paste-a-list
+//! import, #8 fuzzy duplicates) registers `export.csv`,
+//! `export.library` and `import.paste` — their logic lives in
+//! `export_data` and `paste_import`, so the dispatch arms stay thin —
+//! and widens `library.find_duplicates` (the fuzzy pass lives in
+//! `duplicates`, next to the exact/possible matching it extends).
+//!
+//! Slice 4 (#11 barcode add, #12 tried-it, #13 caffeine sort +
+//! filter, #9 missing-cover sweep) registers `library.missing_covers`,
+//! adds the `caffeine` sort kind and the `caffeine_min` query filter
+//! (the value parsing lives in `drinks`), and lets `item.edit` take
+//! the same `cover_bytes_base64`/`cover_ext` params as `item.add`, so
+//! the sweep can set a fetched cover on an existing item through the
+//! shared `write_cover` path. The barcode lookup itself is a provider-
+//! family network seam (`barcode`), not a registry command.
+//!
+//! Slice 6 (#10 trash) points `item.remove`/`items.bulk_remove` at
+//! `Library.trash` and registers `trash.list`/`trash.restore`/
+//! `trash.remove`/`trash.empty`; the mechanics live in `trash`, so
+//! the arms below stay thin. (#19 automatic backups, #18 update
+//! check, #20 first-run wizard are app-layer: `auto_backup`,
+//! `update_check`, `app_wizard`.)
+//!
 //! Slice 2 (#4 + #2) added undo/redo and filtered global search:
 //! [`History`] is the session-layer undo stack. When a [`CommandContext`]
 //! carries a history handle, [`dispatch`] snapshots the library before
@@ -36,11 +67,15 @@
 use crate::backup::{self, BackupScope};
 use crate::csv_import::{self, ImportError, ImportTarget};
 use crate::duplicates;
+use crate::export_data;
 use crate::export_text;
 use crate::layout::{self, Arrangement};
-use crate::model::{Category, FavList, Item, Library, SortKind};
+use crate::model::{Category, FavList, Item, ItemStatus, Library, SortKind};
+use crate::paste_import::{self, PasteRow};
 use crate::render::{self, FitMode, ImageFormat};
 use crate::share_card;
+use crate::trash;
+use crate::views::{self, SmartView};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -255,31 +290,55 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "list.sort",
-        summary: "One-shot sort. Params: list_id, kind (title|year|added|rating). Rating: highest first, unrated last.",
+        summary: "One-shot sort. Params: list_id, kind (title|year|added|rating|caffeine). Rating and caffeine: highest first, items without the value last.",
         mutating: true,
         handler: cmd_list_sort,
     },
     CommandSpec {
         name: "list.query",
-        summary: "In-list filter: items whose title contains the query (case-insensitive). Params: list_id, query.",
+        summary: "In-list filter: items whose title contains the query (case-insensitive), with optional tag/status filters. Params: list_id, query, tag? (exact tag, case-insensitive), status? (want|tried|owned), caffeine_min? (number, mg/100ml: only items with a caffeine value at or above it).",
         mutating: false,
         handler: cmd_list_query,
     },
     CommandSpec {
         name: "library.search",
-        summary: "The list.query predicate applied across every list, with optional filters. Params: query (title contains, case-insensitive; empty matches every title), category? (category id), year? (the item's year/years field contains the text), genre? (genre field contains, case-insensitive).",
+        summary: "The list.query predicate applied across every list, with optional filters. Params: query (title or tag text contains, case-insensitive; empty matches every title), category? (category id), year? (the item's year/years field contains the text), genre? (genre field contains, case-insensitive), tag? (exact tag, case-insensitive), status? (want|tried|owned).",
         mutating: false,
         handler: cmd_library_search,
     },
     CommandSpec {
+        name: "library.tags",
+        summary: "Every tag in the library with its item count, sorted case-insensitively. Result: {tags: [{tag, count}]}.",
+        mutating: false,
+        handler: cmd_library_tags,
+    },
+    CommandSpec {
+        name: "library.view",
+        summary: "Entries of a smart view across all lists, in view order. Params: view (top_rated|recently_added|needs_rating), limit? (clamped 1-25 like share-card counts; absent = all). Result: {view, name, entries: [{list_id, list_name, category, item_id, title, item}]}.",
+        mutating: false,
+        handler: cmd_library_view,
+    },
+    CommandSpec {
+        name: "library.pick",
+        summary: "Pick one random entry ('Pick for me'). Params: at most one scope — list_id | category (category id) | view (smart-view id); no scope = the whole library; more than one scope is bad_params. seed? (unsigned integer) makes the pick deterministic; absent = clock-seeded. Result: {entry} or {entry: null} for an empty scope. Non-mutating.",
+        mutating: false,
+        handler: cmd_library_pick,
+    },
+    CommandSpec {
+        name: "library.missing_covers",
+        summary: "Every item with no cover, in library order (non-mutating). Result: {entries: [{list_id, list_name, category, item_id, title}], total}.",
+        mutating: false,
+        handler: cmd_library_missing_covers,
+    },
+    CommandSpec {
         name: "library.find_duplicates",
-        summary: "Find groups of the same work appearing in 2+ places (non-mutating). Result: {groups: [{category, key, confidence (exact|possible), copies: [{list_id, list_name, item_id, title, year}]}]}. Matching: category + normalised title (leading article stripped); exact when years agree or are missing on some copies, possible when years conflict.",
+        summary: "Find groups of the same work appearing in 2+ places (non-mutating). Result: {groups: [{category, key, confidence (exact|possible), match_kind (title|similar), copies: [{list_id, list_name, item_id, title, year}]}]}. Matching: category + v2-normalised title (leading article stripped; number words/roman numerals become digits; edition tokens stripped); exact when years agree or are missing on some copies, possible when years conflict. A fuzzy pass also groups near-identical titles (small Levenshtein distance, years equal/missing/one apart) as possible with match_kind 'similar'.",
         mutating: false,
         handler: cmd_library_find_duplicates,
     },
     CommandSpec {
         name: "library.merge_duplicates",
-        summary: "Merge duplicate copies into one kept copy. Params: keep {list_id, item_id}, drop [{list_id, item_id}, ...] (at least one). The kept item first adopts any field it lacks (and a cover / provider id) from the dropped copies, then the dropped copies are removed. One dispatch = one undo step.",
+        summary: "Merge duplicate copies into one kept copy. Params: keep {list_id, item_id}, drop [{list_id, item_id}, ...] (at least one). The kept item first adopts any field it lacks (and a cover / provider id, the union of tags, and a status if it has none) from the dropped copies, then the dropped copies are removed. One dispatch = one undo step.",
         mutating: true,
         handler: cmd_library_merge_duplicates,
     },
@@ -297,19 +356,19 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "item.add",
-        summary: "Add an item to a list (same-work duplicates are reported, not added). Params: list_id, title, fields?, provider_id?, source?, cover?, cover_bytes_base64?+cover_ext?, added_at?, rating? (1-10), note?.",
+        summary: "Add an item to a list (same-work duplicates are reported, not added). Params: list_id, title, fields?, provider_id?, source?, cover?, cover_bytes_base64?+cover_ext?, added_at?, rating? (1-10), note?, tags? (array of strings, normalised), status? (want|tried|owned).",
         mutating: true,
         handler: cmd_item_add,
     },
     CommandSpec {
         name: "item.remove",
-        summary: "Remove an item from a list. Params: list_id, item_id.",
+        summary: "Move an item from a list to the trash (kept 30 days, restorable via trash.restore). Params: list_id, item_id.",
         mutating: true,
         handler: cmd_item_remove,
     },
     CommandSpec {
         name: "item.edit",
-        summary: "Edit an item: title?, fields? (wholesale replace), cover? (name, or null to clear), rating? (1-10, or null to clear), note? (trimmed; empty clears). Params: list_id, item_id.",
+        summary: "Edit an item: title?, fields? (wholesale replace), cover? (name, or null to clear), cover_bytes_base64?+cover_ext? (write a fetched cover, as in item.add; wins over cover), rating? (1-10, or null to clear), note? (trimmed; empty clears), tags? (array of strings, normalised; null clears), status? (want|tried|owned, or null to clear). Params: list_id, item_id.",
         mutating: true,
         handler: cmd_item_edit,
     },
@@ -333,7 +392,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "items.bulk_remove",
-        summary: "Remove several items from one list in a single dispatch (one undo step). Params: list_id, item_ids[]. Result lists the ids actually removed; ids not in the list are ignored.",
+        summary: "Move several items from one list to the trash in a single dispatch (one undo step). Params: list_id, item_ids[]. Result lists the ids actually removed; ids not in the list are ignored.",
         mutating: true,
         handler: cmd_items_bulk_remove,
     },
@@ -348,6 +407,30 @@ pub const COMMANDS: &[CommandSpec] = &[
         summary: "Copy items to another list with NEW item ids (the cover file reference is shared, not duplicated). Params: from_list_id, to_list_id, item_ids[]. Items whose work is already in the target are skipped and reported. One dispatch = one undo step.",
         mutating: true,
         handler: cmd_items_bulk_copy,
+    },
+    CommandSpec {
+        name: "trash.list",
+        summary: "List the trash (purges entries older than 30 days first). Result: {entries: [{item_id, title, from_list_id, from_list_name, deleted_at, days_left}], total}.",
+        mutating: false,
+        handler: cmd_trash_list,
+    },
+    CommandSpec {
+        name: "trash.restore",
+        summary: "Restore a trashed item (keeps its id, appended at the end). Params: item_id, list_id? (default: the original list, which must still exist). A same-work conflict in the target is bad_params.",
+        mutating: true,
+        handler: cmd_trash_restore,
+    },
+    CommandSpec {
+        name: "trash.remove",
+        summary: "Delete one trashed item forever. Params: item_id.",
+        mutating: true,
+        handler: cmd_trash_remove,
+    },
+    CommandSpec {
+        name: "trash.empty",
+        summary: "Delete every trashed item forever. Result: {removed}.",
+        mutating: true,
+        handler: cmd_trash_empty,
     },
     CommandSpec {
         name: "export.text",
@@ -369,7 +452,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "export.share_card",
-        summary: "Render a designed share-card PNG (1200x630, WITH text: list name header, rank/cover/title/year rows). Params: list_id, path, count? (default 10, clamped 1-25). Requires a system font (loaded at runtime, never bundled); result reports entries rendered and missing_indices for coverless items.",
+        summary: "Render a designed share-card PNG (1200x630, WITH text: name header, rank/cover/title/year rows). Params: list_id OR view (smart-view id; exactly one of the two), path, count? (default 10, clamped 1-25). A view card takes its entries in view order under the view's display name. Requires a system font (loaded at runtime, never bundled); result reports the header in 'title', entries rendered and missing_indices for coverless items.",
         mutating: false,
         handler: cmd_export_share_card,
     },
@@ -390,6 +473,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         summary: "Merge-import a diary/ratings/library CSV export (format detected by header signature; never overwrites). Params: path, target {mode: new, name, category?} | {mode: existing, list_id}. One dispatch = one undo step. Result: {format, added, skipped, skipped_duplicates, skipped_wrong_category, invalid, lists: [{list_id, name, category, added}]}.",
         mutating: true,
         handler: cmd_import_csv,
+    },
+    CommandSpec {
+        name: "export.csv",
+        summary: "Write one list as CSV (title, the category's field columns plus any extra fields items carry (e.g. caffeine), rating, note, tags, status, provider_id, source, added_at; RFC 4180 quoting). Params: list_id, path. Result: {path, written, rows}.",
+        mutating: false,
+        handler: cmd_export_csv,
+    },
+    CommandSpec {
+        name: "export.library",
+        summary: "Write the whole library: format 'json' = the library's own serialisation; format 'csv' = list/category columns plus the union of field columns and any extra item fields, one row per item. Params: format (csv|json), path. Result: {path, written, format, lists, items}.",
+        mutating: false,
+        handler: cmd_export_library,
+    },
+    CommandSpec {
+        name: "import.paste",
+        summary: "Merge-import pasted rows (never overwrites; duplicates inside the paste: first wins). Params: rows [{title, fields?, provider_id?, source?}] (max 500), target {mode: new, name, category (required — rows carry none)} | {mode: existing, list_id}. One dispatch = one undo step. Result: {added, skipped, skipped_duplicates, skipped_wrong_category, invalid, skipped_empty, lists: [{list_id, name, category, added}]}.",
+        mutating: true,
+        handler: cmd_import_paste,
     },
 ];
 
@@ -586,9 +687,89 @@ fn parse_note(m: &Map<String, Value>) -> Result<Option<String>, CommandError> {
     }
 }
 
+/// Parse the optional `tags` param (v0.3 #4): absent → `Ok(None)` (leave
+/// the item's tags alone); JSON null → `Ok(Some(vec![]))` (clear); an
+/// array of strings → `Ok(Some(normalised))` via the model's rules (an
+/// over-long tag or more than the per-item cap is a clean `bad_params`,
+/// never a silent truncation). Validated before any mutation, like
+/// `rating`.
+fn parse_tags(m: &Map<String, Value>) -> Result<Option<Vec<String>>, CommandError> {
+    match m.get("tags") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(Vec::new())),
+        Some(Value::Array(a)) => {
+            let mut raw = Vec::with_capacity(a.len());
+            for v in a {
+                raw.push(
+                    v.as_str()
+                        .ok_or_else(|| CommandError::bad_params("'tags' entries must be strings"))?
+                        .to_string(),
+                );
+            }
+            let normalised =
+                crate::model::normalise_tags(&raw).map_err(CommandError::bad_params)?;
+            Ok(Some(normalised))
+        }
+        Some(_) => Err(CommandError::bad_params(
+            "'tags' must be an array of strings or null",
+        )),
+    }
+}
+
+/// Parse the optional `status` param (v0.3 #5): absent → `Ok(None)`;
+/// JSON null → `Ok(Some(None))` (clear); one of `"want"|"tried"|"owned"`
+/// → `Ok(Some(Some(_)))`. Anything else is a clean `bad_params`, like an
+/// out-of-range `rating`.
+fn parse_status(m: &Map<String, Value>) -> Result<Option<Option<ItemStatus>>, CommandError> {
+    match m.get("status") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) => {
+            let status = ItemStatus::from_id(s).ok_or_else(|| {
+                CommandError::bad_params(format!(
+                    "unknown status '{s}' (expected want|tried|owned)"
+                ))
+            })?;
+            Ok(Some(Some(status)))
+        }
+        Some(_) => Err(CommandError::bad_params(
+            "'status' must be \"want\"|\"tried\"|\"owned\" or null",
+        )),
+    }
+}
+
+/// Parse an optional exact-match `tag` filter (`list.query` /
+/// `library.search`): absent, null, or blank → no filter; otherwise the
+/// lower-cased tag text (matching is case-insensitive).
+fn parse_tag_filter(m: &Map<String, Value>) -> Result<Option<String>, CommandError> {
+    Ok(opt_str_strict(m, "tag")?
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Parse an optional `status` filter (`list.query` / `library.search`):
+/// absent or null → no filter; a string must be a valid status id.
+fn parse_status_filter(m: &Map<String, Value>) -> Result<Option<ItemStatus>, CommandError> {
+    match m.get("status") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => ItemStatus::from_id(s).map(Some).ok_or_else(|| {
+            CommandError::bad_params(format!(
+                "unknown status filter '{s}' (expected want|tried|owned)"
+            ))
+        }),
+        Some(_) => Err(CommandError::bad_params("'status' filter must be a string")),
+    }
+}
+
+/// Exact tag membership, case-insensitive (`tag_lower` is already
+/// lower-cased by [`parse_tag_filter`]).
+fn item_has_tag(item: &Item, tag_lower: &str) -> bool {
+    item.tags.iter().any(|t| t.to_lowercase() == tag_lower)
+}
+
 /// Field keys for a text/Markdown export: the `fields` param when given
-/// (category keys plus the #5 pseudo-fields "rating"/"note"), otherwise
-/// all of the list category's fields.
+/// (category keys plus the pseudo-fields "rating"/"note"/"tags"/"status"),
+/// otherwise all of the list category's fields.
 fn export_field_keys(m: &Map<String, Value>, list: &FavList) -> Result<Vec<String>, CommandError> {
     match m.get("fields") {
         None => Ok(list
@@ -711,9 +892,10 @@ fn cmd_list_sort(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, 
         "year" => SortKind::Year,
         "added" => SortKind::DateAdded,
         "rating" => SortKind::Rating,
+        "caffeine" => SortKind::Caffeine,
         other => {
             return Err(CommandError::bad_params(format!(
-                "unknown sort kind '{other}' (expected title|year|added|rating)"
+                "unknown sort kind '{other}' (expected title|year|added|rating|caffeine)"
             )))
         }
     };
@@ -727,6 +909,19 @@ fn title_matches(title: &str, query_lower: &str) -> bool {
     query_lower.is_empty() || title.to_lowercase().contains(query_lower)
 }
 
+/// Parse an optional `caffeine_min` filter (`list.query`): absent or
+/// null → no filter; when present it must be a number (mg/100ml) — a
+/// mistyped filter is a clean `bad_params`, like the other filters.
+fn parse_caffeine_min(m: &Map<String, Value>) -> Result<Option<f64>, CommandError> {
+    match m.get("caffeine_min") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| CommandError::bad_params("'caffeine_min' must be a number (mg/100ml)")),
+    }
+}
+
 fn cmd_list_query(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
     let m = obj(params)?;
     let list = list_ref(ctx, req_u64(m, "list_id")?)?;
@@ -734,11 +929,25 @@ fn cmd_list_query(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value,
         .unwrap_or_default()
         .trim()
         .to_lowercase();
+    let tag = parse_tag_filter(m)?;
+    let status = parse_status_filter(m)?;
+    let caffeine_min = parse_caffeine_min(m)?;
     let items: Vec<Value> = list
         .items
         .iter()
         .enumerate()
         .filter(|(_, it)| title_matches(&it.title, &q))
+        .filter(|(_, it)| tag.as_deref().map(|t| item_has_tag(it, t)).unwrap_or(true))
+        .filter(|(_, it)| status.map(|s| it.status == Some(s)).unwrap_or(true))
+        .filter(|(_, it)| {
+            caffeine_min
+                .map(|min| {
+                    crate::drinks::caffeine_value(it)
+                        .map(|v| v >= min)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true)
+        })
         .map(|(i, it)| Ok(json!({"index": i, "item": to_json(it)?})))
         .collect::<Result<_, CommandError>>()?;
     Ok(json!({"list_id": list.id, "matches": items}))
@@ -774,6 +983,8 @@ fn cmd_library_search(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Va
     let genre = opt_str_strict(m, "genre")?
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
+    let tag = parse_tag_filter(m)?;
+    let status = parse_status_filter(m)?;
     let mut matches = Vec::new();
     for list in &ctx.library.lists {
         if let Some(cat) = category {
@@ -783,7 +994,23 @@ fn cmd_library_search(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Va
         }
         for (i, it) in list.items.iter().enumerate() {
             if !title_matches(&it.title, &q) {
-                continue;
+                // Tag text joins the searchable text (v0.3 #4): a query
+                // appearing in any of the item's tags is also a hit.
+                let tag_hit =
+                    !q.is_empty() && it.tags.iter().any(|t| t.to_lowercase().contains(&q));
+                if !tag_hit {
+                    continue;
+                }
+            }
+            if let Some(t) = &tag {
+                if !item_has_tag(it, t) {
+                    continue;
+                }
+            }
+            if let Some(s) = status {
+                if it.status != Some(s) {
+                    continue;
+                }
             }
             if let Some(y) = &year {
                 // The category's year field ("year", or "years" for TV):
@@ -821,6 +1048,124 @@ fn cmd_library_search(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Va
         }
     }
     Ok(json!({"matches": matches}))
+}
+
+fn cmd_library_tags(ctx: &mut CommandContext<'_>, _params: &Value) -> Result<Value, CommandError> {
+    let tags: Vec<Value> = ctx
+        .library
+        .tag_counts()
+        .into_iter()
+        .map(|(tag, count)| json!({"tag": tag, "count": count}))
+        .collect();
+    Ok(json!({"tags": tags}))
+}
+
+/// Every coverless item in library order (v0.3 #9). The computation
+/// lives in `views::missing_cover_entries` so the GUI sweep renders
+/// exactly what this command reports.
+fn cmd_library_missing_covers(
+    ctx: &mut CommandContext<'_>,
+    _params: &Value,
+) -> Result<Value, CommandError> {
+    let entries: Vec<Value> = views::missing_cover_entries(ctx.library)
+        .iter()
+        .map(|e| {
+            json!({
+                "list_id": e.list_id,
+                "list_name": e.list_name,
+                "category": e.category.id(),
+                "item_id": e.item.id,
+                "title": e.item.title,
+            })
+        })
+        .collect();
+    let total = entries.len();
+    Ok(json!({"entries": entries, "total": total}))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — smart views + pick (v0.3 Slice 2 #2 + #1)
+// ---------------------------------------------------------------------------
+
+/// Parse a `view` param (smart-view id) — a clean `bad_params` for
+/// anything that is not one of the three view ids.
+fn parse_smart_view(m: &Map<String, Value>, key: &str) -> Result<SmartView, CommandError> {
+    let id = req_str(m, key)?;
+    SmartView::from_id(id).ok_or_else(|| {
+        CommandError::bad_params(format!(
+            "unknown smart view '{id}' (expected top_rated|recently_added|needs_rating)"
+        ))
+    })
+}
+
+/// One view/pick entry as JSON — the `library.search` match shape
+/// (`list_id`, `list_name`, `category`, `item_id`, `title`, `item`).
+fn entry_json(entry: &views::ViewEntry) -> Result<Value, CommandError> {
+    Ok(json!({
+        "list_id": entry.list_id,
+        "list_name": entry.list_name,
+        "category": entry.category.id(),
+        "item_id": entry.item.id,
+        "title": entry.item.title,
+        "item": to_json(&entry.item)?,
+    }))
+}
+
+fn cmd_library_view(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let view = parse_smart_view(m, "view")?;
+    // `limit` clamps exactly like share-card counts (1-25); absent or
+    // null means the whole view.
+    let limit = match m.get("limit") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .ok_or_else(|| CommandError::bad_params("'limit' must be an unsigned integer"))?
+                as usize,
+        ),
+    };
+    let mut entries = views::view_items(ctx.library, view);
+    if let Some(limit) = limit {
+        entries.truncate(limit.clamp(1, share_card::MAX_ENTRIES));
+    }
+    let entries: Vec<Value> = entries
+        .iter()
+        .map(entry_json)
+        .collect::<Result<_, CommandError>>()?;
+    Ok(json!({"view": view.id(), "name": view.name(), "entries": entries}))
+}
+
+fn cmd_library_pick(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let present = |key: &str| matches!(m.get(key), Some(v) if !v.is_null());
+    let scopes = [present("list_id"), present("category"), present("view")]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if scopes > 1 {
+        return Err(CommandError::bad_params(
+            "give exactly one pick scope: 'list_id', 'category', or 'view'",
+        ));
+    }
+    let entries: Vec<views::ViewEntry> = if present("list_id") {
+        views::list_entries(list_ref(ctx, req_u64(m, "list_id")?)?)
+    } else if present("category") {
+        views::category_entries(ctx.library, parse_category(m, "category")?)
+    } else if present("view") {
+        views::view_items(ctx.library, parse_smart_view(m, "view")?)
+    } else {
+        views::all_entries(ctx.library)
+    };
+    let seed = match m.get("seed") {
+        None | Some(Value::Null) => views::time_seed(),
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| CommandError::bad_params("'seed' must be an unsigned integer"))?,
+    };
+    match views::pick_index(seed, entries.len()) {
+        None => Ok(json!({"entry": Value::Null})),
+        Some(i) => Ok(json!({"entry": entry_json(&entries[i])?})),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +1267,42 @@ fn cmd_library_merge_duplicates(
             adopted_provider = true;
         }
     }
+    // Tags (v0.3 #4): the kept copy adopts the union of every copy's
+    // tags (its own spellings win, then dropped copies in order; stored
+    // sets are already normalised, so the union only needs dedupe +
+    // sort). A union of two valid sets can exceed the per-item cap —
+    // the merge keeps the first MAX tags in sorted order rather than
+    // failing a cleanup operation over it.
+    let mut tag_union: Vec<String> = Vec::new();
+    for tag in kept
+        .tags
+        .iter()
+        .chain(dropped_items.iter().flat_map(|d| d.tags.iter()))
+    {
+        if !tag_union
+            .iter()
+            .any(|t| t.to_lowercase() == tag.to_lowercase())
+        {
+            tag_union.push(tag.clone());
+        }
+    }
+    tag_union.sort_by_key(|a| a.to_lowercase());
+    tag_union.truncate(crate::model::MAX_TAGS_PER_ITEM);
+    let adopted_tags = tag_union.len().saturating_sub(kept.tags.len());
+    kept.tags = tag_union;
+    // Status (v0.3 #5): adopted only when the kept copy has none —
+    // first dropped copy with a status wins; a kept status is never
+    // overwritten.
+    let mut adopted_status = false;
+    if kept.status.is_none() {
+        for dropped in &dropped_items {
+            if dropped.status.is_some() {
+                kept.status = dropped.status;
+                adopted_status = true;
+                break;
+            }
+        }
+    }
     // Write the enriched kept copy back, then remove the dropped copies.
     // (Existence was validated above and nothing has mutated since, so
     // these lookups cannot fail; they still return structured errors
@@ -944,6 +1325,8 @@ fn cmd_library_merge_duplicates(
         "adopted_fields": adopted_fields,
         "adopted_cover": adopted_cover,
         "adopted_provider": adopted_provider,
+        "adopted_tags": adopted_tags,
+        "adopted_status": adopted_status,
     }))
 }
 
@@ -1013,6 +1396,8 @@ fn cmd_item_add(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, C
     let fields = parse_fields(m)?.unwrap_or_default();
     let rating = parse_rating(m)?.flatten();
     let note = parse_note(m)?.unwrap_or_default();
+    let tags = parse_tags(m)?.unwrap_or_default();
+    let status = parse_status(m)?.flatten();
     // Validate the target list exists before allocating an id or writing a
     // cover, so a bad list_id leaves no trace.
     list_ref(ctx, list_id)?;
@@ -1021,6 +1406,8 @@ fn cmd_item_add(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, C
     item.fields = fields;
     item.rating = rating;
     item.note = note;
+    item.tags = tags;
+    item.status = status;
     item.provider_id = opt_str(m, "provider_id");
     if let Some(source) = opt_str(m, "source") {
         item.source = source;
@@ -1050,8 +1437,8 @@ fn cmd_item_remove(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value
     let m = obj(params)?;
     let list_id = req_u64(m, "list_id")?;
     let item_id = req_u64(m, "item_id")?;
-    let list = list_mut(ctx, list_id)?;
-    if list.remove_item(item_id) {
+    list_ref(ctx, list_id)?;
+    if trash::move_to_trash(ctx.library, list_id, item_id, crate::model::now_unix()) {
         Ok(json!({"list_id": list_id, "item_id": item_id, "removed": true}))
     } else {
         Err(CommandError::not_found(format!(
@@ -1066,12 +1453,14 @@ fn cmd_item_edit(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, 
     let item_id = req_u64(m, "item_id")?;
     let new_title = opt_str(m, "title");
     let new_fields = parse_fields(m)?;
-    // Rating/note are validated BEFORE the item is looked up and mutated,
-    // so an invalid rating errors with zero state change.
+    // Rating/note/tags/status are validated BEFORE the item is looked up
+    // and mutated, so an invalid value errors with zero state change.
     let new_rating = parse_rating(m)?;
     let new_note = parse_note(m)?;
+    let new_tags = parse_tags(m)?;
+    let new_status = parse_status(m)?;
     let cover_present = m.contains_key("cover");
-    let new_cover: Option<Option<String>> = if cover_present {
+    let mut new_cover: Option<Option<String>> = if cover_present {
         match m.get("cover") {
             Some(Value::String(s)) => Some(Some(s.clone())),
             Some(Value::Null) => Some(None),
@@ -1080,6 +1469,15 @@ fn cmd_item_edit(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, 
     } else {
         None
     };
+    // Fetched cover bytes (v0.3 #9), the same params `item.add` takes,
+    // written through the same `write_cover` — validated and written
+    // BEFORE the lookup/mutation, like the other validations here, and
+    // winning over an explicit `cover` name when both are given (the
+    // add handler's precedence).
+    if let Some(b64) = opt_str(m, "cover_bytes_base64") {
+        let ext = opt_str(m, "cover_ext").unwrap_or_else(|| "jpg".to_string());
+        new_cover = Some(Some(write_cover(ctx.covers_dir, item_id, &b64, &ext)?));
+    }
     let list = list_mut(ctx, list_id)?;
     let item = list.item_mut(item_id).ok_or_else(|| {
         CommandError::not_found(format!("no item with id {item_id} in list {list_id}"))
@@ -1095,6 +1493,12 @@ fn cmd_item_edit(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, 
     }
     if let Some(n) = new_note {
         item.note = n;
+    }
+    if let Some(t) = new_tags {
+        item.tags = t;
+    }
+    if let Some(s) = new_status {
+        item.status = s;
     }
     if let Some(c) = new_cover {
         item.cover = c;
@@ -1175,14 +1579,48 @@ fn cmd_items_bulk_remove(
     let m = obj(params)?;
     let list_id = req_u64(m, "list_id")?;
     let ids = req_id_array(m, "item_ids")?;
-    let list = list_mut(ctx, list_id)?;
-    let mut removed: Vec<u64> = Vec::new();
-    for id in &ids {
-        if list.remove_item(*id) {
-            removed.push(*id);
+    list_ref(ctx, list_id)?;
+    let removed = trash::move_many_to_trash(ctx.library, list_id, &ids, crate::model::now_unix());
+    Ok(json!({"list_id": list_id, "removed": removed}))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — trash (v0.3 Slice 6 #10). All mechanics live in `trash`;
+// these arms only parse params and map errors.
+// ---------------------------------------------------------------------------
+
+fn cmd_trash_list(ctx: &mut CommandContext<'_>, _params: &Value) -> Result<Value, CommandError> {
+    let now = crate::model::now_unix();
+    trash::purge_expired(&mut ctx.library.trash, now);
+    let entries = trash::entries(ctx.library, now);
+    Ok(json!({"entries": entries, "total": entries.len()}))
+}
+
+fn cmd_trash_restore(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let item_id = req_u64(m, "item_id")?;
+    match trash::restore(ctx.library, item_id, opt_u64(m, "list_id")) {
+        Ok(restored_to) => Ok(json!({"item_id": item_id, "restored_to": restored_to})),
+        Err(e) => {
+            let (code, message) = trash::restore_error(&e);
+            Err(CommandError { code, message })
         }
     }
-    Ok(json!({"list_id": list_id, "removed": removed}))
+}
+
+fn cmd_trash_remove(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let item_id = req_u64(obj(params)?, "item_id")?;
+    if trash::remove_permanent(ctx.library, item_id) {
+        Ok(json!({"item_id": item_id, "removed": true}))
+    } else {
+        Err(CommandError::not_found(format!(
+            "no trashed item with id {item_id}"
+        )))
+    }
+}
+
+fn cmd_trash_empty(ctx: &mut CommandContext<'_>, _params: &Value) -> Result<Value, CommandError> {
+    Ok(json!({"removed": trash::empty_trash(ctx.library)}))
 }
 
 fn cmd_items_bulk_move(
@@ -1478,12 +1916,33 @@ fn cmd_backup_import(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Val
 // Handlers — share card (Slice 5 #8) + CSV import (Slice 5 #10)
 // ---------------------------------------------------------------------------
 
+/// One share-card row before covers are decoded: title, the year's
+/// display text (the category's year field, when present), and the
+/// cover file name. Built identically for a list and for a smart view
+/// (v0.3 Slice 2 #3) so the render path below never cares which.
+struct CardRow {
+    title: String,
+    year: Option<String>,
+    cover: Option<String>,
+}
+
+fn card_row(category: Category, item: &Item) -> CardRow {
+    CardRow {
+        title: item.title.clone(),
+        year: category
+            .year_key()
+            .and_then(|k| item.field(k))
+            .filter(|y| !y.trim().is_empty())
+            .map(|y| y.to_string()),
+        cover: item.cover.clone(),
+    }
+}
+
 fn cmd_export_share_card(
     ctx: &mut CommandContext<'_>,
     params: &Value,
 ) -> Result<Value, CommandError> {
     let m = obj(params)?;
-    let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
     let path = req_str(m, "path")?.to_string();
     // count: default 10, clamped to the card's 1-25 range.
     let count = match m.get("count") {
@@ -1494,41 +1953,77 @@ fn cmd_export_share_card(
             as usize,
     }
     .clamp(1, share_card::MAX_ENTRIES);
-    if list.items.is_empty() {
-        return Err(CommandError::bad_params(
-            "cannot make a share card for an empty list",
-        ));
-    }
-    let chosen: Vec<&Item> = list.items.iter().take(count).collect();
+    // Source: exactly one of `list_id` (the original path) or `view`
+    // (Slice 2 #3 — entries in view order, the view's display name as
+    // the header). Both or neither is a clean bad_params.
+    let present = |key: &str| matches!(m.get(key), Some(v) if !v.is_null());
+    let (header, rows): (String, Vec<CardRow>) = match (present("list_id"), present("view")) {
+        (true, true) => {
+            return Err(CommandError::bad_params(
+                "give either 'list_id' or 'view', not both",
+            ))
+        }
+        (false, false) => {
+            return Err(CommandError::bad_params(
+                "missing or invalid 'list_id' (expected an unsigned integer, or a 'view' id)",
+            ))
+        }
+        (true, false) => {
+            let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
+            if list.items.is_empty() {
+                return Err(CommandError::bad_params(
+                    "cannot make a share card for an empty list",
+                ));
+            }
+            let rows = list
+                .items
+                .iter()
+                .take(count)
+                .map(|it| card_row(list.category, it))
+                .collect();
+            (list.name.clone(), rows)
+        }
+        (false, true) => {
+            let view = parse_smart_view(m, "view")?;
+            let entries = views::view_items(ctx.library, view);
+            if entries.is_empty() {
+                return Err(CommandError::bad_params(format!(
+                    "cannot make a share card: the {} view is empty",
+                    view.name()
+                )));
+            }
+            let rows = entries
+                .iter()
+                .take(count)
+                .map(|e| card_row(e.category, &e.item))
+                .collect();
+            (view.name().to_string(), rows)
+        }
+    };
     let covers_dir = ctx.covers_dir;
-    let images: Vec<Option<image::DynamicImage>> = chosen
+    let images: Vec<Option<image::DynamicImage>> = rows
         .iter()
-        .map(|it| {
-            it.cover
+        .map(|row| {
+            row.cover
                 .as_ref()
                 .and_then(|c| image::open(covers_dir.join(c)).ok())
         })
         .collect();
-    let entries: Vec<share_card::CardEntry<'_>> = chosen
+    let entries: Vec<share_card::CardEntry<'_>> = rows
         .iter()
         .zip(images.iter())
-        .map(|(it, cover)| share_card::CardEntry {
-            title: &it.title,
-            year: list
-                .category
-                .year_key()
-                .and_then(|k| it.field(k))
-                .filter(|y| !y.trim().is_empty()),
+        .map(|(row, cover)| share_card::CardEntry {
+            title: &row.title,
+            year: row.year.as_deref(),
             cover: cover.as_ref(),
         })
         .collect();
     // A missing system font is a clean io-style error, not a panic and
     // not a silently textless card (see share_card's module docs).
-    let rendered =
-        share_card::render_card(&list.name, &entries).map_err(|message| CommandError {
-            code: "io",
-            message,
-        })?;
+    let rendered = share_card::render_card(&header, &entries).map_err(|message| CommandError {
+        code: "io",
+        message,
+    })?;
     let bytes =
         render::encode(&rendered.image, ImageFormat::Png).map_err(CommandError::internal)?;
     std::fs::write(&path, bytes).map_err(CommandError::io)?;
@@ -1537,6 +2032,7 @@ fn cmd_export_share_card(
         "written": true,
         "width": share_card::CARD_W,
         "height": share_card::CARD_H,
+        "title": header,
         "entries": entries.len(),
         "missing_indices": rendered.missing_indices,
     }))
@@ -1596,6 +2092,111 @@ fn cmd_import_csv(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value,
         "skipped_duplicates": outcome.skipped_duplicates,
         "skipped_wrong_category": outcome.skipped_wrong_category,
         "invalid": outcome.invalid,
+        "lists": outcome.lists.iter().map(|l| json!({
+            "list_id": l.list_id,
+            "name": l.name,
+            "category": l.category.id(),
+            "added": l.added,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — CSV/JSON export + paste import (v0.3 Slice 3 #6 + #7)
+// ---------------------------------------------------------------------------
+
+fn cmd_export_csv(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
+    let path = req_str(m, "path")?;
+    let rows = export_data::write_list_csv(&list, Path::new(path)).map_err(CommandError::io)?;
+    Ok(json!({"path": path, "written": true, "rows": rows}))
+}
+
+fn cmd_export_library(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let format = req_str(m, "format")?;
+    let path = req_str(m, "path")?;
+    let (lists, items) = match format {
+        "csv" => export_data::write_library_csv(ctx.library, Path::new(path)),
+        "json" => export_data::write_library_json(ctx.library, Path::new(path)),
+        other => {
+            return Err(CommandError::bad_params(format!(
+                "unknown format '{other}' (expected csv|json)"
+            )))
+        }
+    }
+    .map_err(CommandError::io)?;
+    Ok(json!({
+        "path": path,
+        "written": true,
+        "format": format,
+        "lists": lists,
+        "items": items,
+    }))
+}
+
+/// Parse the `import.paste` `rows` param: an array of
+/// `{title, fields?, provider_id?, source?}` objects, at most
+/// [`paste_import::MAX_PASTE_ROWS`] entries. A missing title counts
+/// as blank (the engine counts it as skipped-empty); a mistyped one
+/// is `bad_params`.
+fn parse_paste_rows(m: &Map<String, Value>) -> Result<Vec<PasteRow>, CommandError> {
+    let arr = m
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CommandError::bad_params("missing or invalid 'rows' (expected an array)"))?;
+    if arr.len() > paste_import::MAX_PASTE_ROWS {
+        return Err(CommandError::bad_params(format!(
+            "too many rows: {} (max {})",
+            arr.len(),
+            paste_import::MAX_PASTE_ROWS
+        )));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let o = v.as_object().ok_or_else(|| {
+            CommandError::bad_params("'rows' entries must be objects {title, fields?, ...}")
+        })?;
+        let title = match o.get("title") {
+            None => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(_) => return Err(CommandError::bad_params("'title' must be a string")),
+        };
+        let fields = parse_fields(o)?.unwrap_or_default();
+        let provider_id = opt_str(o, "provider_id").filter(|s| !s.trim().is_empty());
+        let source = opt_str(o, "source").filter(|s| !s.trim().is_empty());
+        out.push(PasteRow {
+            title,
+            fields,
+            provider_id,
+            source,
+        });
+    }
+    Ok(out)
+}
+
+fn cmd_import_paste(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value, CommandError> {
+    let m = obj(params)?;
+    let target = parse_import_target(m)?;
+    let rows = parse_paste_rows(m)?;
+    let outcome = paste_import::import_paste_rows(&mut *ctx.library, &rows, &target).map_err(
+        |e| match e {
+            ImportError::ListNotFound(id) => {
+                CommandError::not_found(format!("no list with id {id}"))
+            }
+            ImportError::Parse(msg) | ImportError::CategoryMismatch(msg) => {
+                CommandError::bad_params(msg)
+            }
+        },
+    )?;
+    Ok(json!({
+        "added": outcome.added,
+        "skipped": outcome.skipped(),
+        "skipped_duplicates": outcome.skipped_duplicates,
+        "skipped_wrong_category": outcome.skipped_wrong_category,
+        "invalid": outcome.invalid,
+        "skipped_empty": outcome.invalid,
         "lists": outcome.lists.iter().map(|l| json!({
             "list_id": l.list_id,
             "name": l.name,

@@ -10,7 +10,7 @@
 //! library (`duplicates.rs`, `commands.rs`), not here.
 
 use crate::app::{FaveApp, COL_ACCENT, COL_HAIRLINE, COL_MUTED, COL_PANEL};
-use crate::duplicates::{Confidence, DupGroup};
+use crate::duplicates::{Confidence, DupGroup, MatchKind};
 use crate::model::FavList;
 use eframe::egui;
 
@@ -128,7 +128,7 @@ impl FaveApp {
                 self.status = match command {
                     "items.bulk_remove" => {
                         let n = result["removed"].as_array().map(|a| a.len()).unwrap_or(0);
-                        format!("Removed {n} item(s).")
+                        format!("Moved {n} item(s) to Trash.")
                     }
                     "items.bulk_move" => {
                         let moved = result["moved"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -247,6 +247,7 @@ impl FaveApp {
     /// reset to each group's first copy.
     pub(crate) fn open_duplicates(&mut self) {
         self.refresh_duplicates();
+        self.trash_ui.open = false;
         self.dup.open = true;
     }
 
@@ -302,7 +303,7 @@ impl FaveApp {
             for (section, confidence) in [
                 ("Exact matches — same work, years agree", Confidence::Exact),
                 (
-                    "Possible matches — same title, years differ",
+                    "Possible matches — years differ, or titles only similar",
                     Confidence::Possible,
                 ),
             ] {
@@ -337,6 +338,16 @@ impl FaveApp {
                                 ))
                                 .strong(),
                             );
+                            if group.match_kind == MatchKind::Similar {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "similar title — the copies' titles are close \
+                                         but not identical",
+                                    )
+                                    .color(COL_ACCENT)
+                                    .small(),
+                                );
+                            }
                             ui.label(egui::RichText::new("Keep:").color(COL_MUTED).small());
                             let mut keep = self
                                 .dup

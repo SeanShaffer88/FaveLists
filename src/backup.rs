@@ -67,6 +67,9 @@ pub fn export_backup(
         lists: chosen.iter().map(|l| (*l).clone()).collect(),
         next_list_id: library.next_list_id,
         next_item_id: library.next_item_id,
+        // Backups carry lists, not the trash: deleted items are
+        // transient 30-day state, not library content.
+        trash: Vec::new(),
     };
     let payload = BackupPayload {
         app: "FaveLists".to_string(),

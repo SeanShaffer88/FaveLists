@@ -166,6 +166,106 @@ impl fmt::Display for Category {
     }
 }
 
+/// Maximum tags per item and maximum length of one tag (v0.3 #4).
+pub const MAX_TAGS_PER_ITEM: usize = 20;
+pub const MAX_TAG_CHARS: usize = 40;
+
+/// Normalise a proposed tag set (v0.3 program #4): trim each tag, drop
+/// empties, dedupe case-insensitively (first-seen spelling wins), and
+/// sort case-insensitively so stored output is stable. A tag longer
+/// than [`MAX_TAG_CHARS`] characters, or more than
+/// [`MAX_TAGS_PER_ITEM`] tags after dedupe, is an error — never a
+/// silent truncation.
+pub fn normalise_tags(tags: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in tags {
+        let tag = raw.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > MAX_TAG_CHARS {
+            return Err(format!(
+                "tag '{tag}' is longer than {MAX_TAG_CHARS} characters"
+            ));
+        }
+        if !out.iter().any(|t| t.to_lowercase() == tag.to_lowercase()) {
+            out.push(tag.to_string());
+        }
+    }
+    if out.len() > MAX_TAGS_PER_ITEM {
+        return Err(format!(
+            "an item can carry at most {MAX_TAGS_PER_ITEM} tags"
+        ));
+    }
+    out.sort_by_key(|a| a.to_lowercase());
+    Ok(out)
+}
+
+/// Personal status of an entry (v0.3 program #5): where the user stands
+/// with this work. The stored ids (`want` / `tried` / `owned`) are the
+/// same for every category; the words the GUI shows for them adapt per
+/// category (see [`ItemStatus::label_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemStatus {
+    Want,
+    Tried,
+    Owned,
+}
+
+impl ItemStatus {
+    pub const ALL: [ItemStatus; 3] = [ItemStatus::Want, ItemStatus::Tried, ItemStatus::Owned];
+    /// The two non-Owned statuses — the drinks categories' option set.
+    const WITHOUT_OWNED: [ItemStatus; 2] = [ItemStatus::Want, ItemStatus::Tried];
+
+    /// Stable machine id used in files and command params.
+    pub fn id(self) -> &'static str {
+        match self {
+            ItemStatus::Want => "want",
+            ItemStatus::Tried => "tried",
+            ItemStatus::Owned => "owned",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<ItemStatus> {
+        ItemStatus::ALL.into_iter().find(|s| s.id() == id)
+    }
+
+    /// The GUI wording for this status in a category. Drinks categories
+    /// never *offer* Owned (see [`ItemStatus::options_for`]), but a
+    /// stored Owned still needs a word — the generic one.
+    pub fn label_for(self, category: Category) -> &'static str {
+        match (category, self) {
+            (Category::Movies | Category::TvShows, ItemStatus::Want) => "Want to watch",
+            (Category::Movies | Category::TvShows, ItemStatus::Tried) => "Watched",
+            (Category::Books, ItemStatus::Want) => "Want to read",
+            (Category::Books, ItemStatus::Tried) => "Read",
+            (
+                Category::Artists | Category::Albums | Category::Songs | Category::Podcasts,
+                ItemStatus::Want,
+            ) => "Want to hear",
+            (
+                Category::Artists | Category::Albums | Category::Songs | Category::Podcasts,
+                ItemStatus::Tried,
+            ) => "Heard",
+            (Category::VideoGames | Category::BoardGames, ItemStatus::Want) => "Want to play",
+            (Category::VideoGames | Category::BoardGames, ItemStatus::Tried) => "Played",
+            (Category::EnergyDrinks | Category::Sodas, ItemStatus::Want) => "Want to try",
+            (Category::EnergyDrinks | Category::Sodas, ItemStatus::Tried) => "Tried",
+            (_, ItemStatus::Owned) => "Own it",
+        }
+    }
+
+    /// The statuses the GUI picker and filters offer for a category:
+    /// all three, except drinks (no Owned — you don't own a soda).
+    pub fn options_for(category: Category) -> &'static [ItemStatus] {
+        match category {
+            Category::EnergyDrinks | Category::Sodas => &ItemStatus::WITHOUT_OWNED,
+            _ => &ItemStatus::ALL,
+        }
+    }
+}
+
 /// One entry in a list: a single work (one entry per work, no editions).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
@@ -195,6 +295,14 @@ pub struct Item {
     /// Personal free-text note (v0.2 program #5). Empty = no note.
     #[serde(default)]
     pub note: String,
+    /// Free-form tags (v0.3 program #4), normalised by
+    /// [`normalise_tags`] on every command write path: trimmed, deduped
+    /// case-insensitively, sorted. Empty = untagged.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Personal status (v0.3 program #5). `None` = no status set.
+    #[serde(default)]
+    pub status: Option<ItemStatus>,
     /// Unix seconds when the item was added.
     pub added_at: i64,
 }
@@ -210,6 +318,8 @@ impl Item {
             cover: None,
             rating: None,
             note: String::new(),
+            tags: Vec::new(),
+            status: None,
             added_at: now_unix(),
         }
     }
@@ -278,6 +388,10 @@ pub enum SortKind {
     DateAdded,
     /// Highest personal rating first; unrated items last (v0.2 #5).
     Rating,
+    /// Highest caffeine content first; items with no caffeine data
+    /// last (v0.3 #13 — the value is parsed from the item's `caffeine`
+    /// field by `drinks::caffeine_value`).
+    Caffeine,
 }
 
 impl FavList {
@@ -370,6 +484,22 @@ impl FavList {
                     (None, None) => std::cmp::Ordering::Equal,
                 });
             }
+            SortKind::Caffeine => {
+                // Highest caffeine first; items without caffeine data
+                // last. Stable, like the rating sort.
+                self.items.sort_by(|a, b| {
+                    let ca = crate::drinks::caffeine_value(a);
+                    let cb = crate::drinks::caffeine_value(b);
+                    match (ca, cb) {
+                        (Some(x), Some(y)) => {
+                            y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
         }
     }
 
@@ -407,6 +537,14 @@ pub struct Library {
     pub next_list_id: u64,
     #[serde(default = "default_next_id")]
     pub next_item_id: u64,
+    /// Items removed into the trash (v0.3 program #10), in removal
+    /// order. Part of the library (and of every history snapshot)
+    /// so undoing a remove un-trashes exactly; entries older than
+    /// 30 days are purged at load and when listed (see
+    /// `crate::trash`). A library file written before the trash
+    /// existed loads with an empty trash.
+    #[serde(default)]
+    pub trash: Vec<crate::trash::TrashedItem>,
 }
 
 fn default_next_id() -> u64 {
@@ -419,6 +557,7 @@ impl Default for Library {
             lists: Vec::new(),
             next_list_id: 1,
             next_item_id: 1,
+            trash: Vec::new(),
         }
     }
 }
@@ -461,6 +600,30 @@ impl Library {
     pub fn total_items(&self) -> usize {
         self.lists.iter().map(|l| l.items.len()).sum()
     }
+
+    /// Every tag in the library with the number of items carrying it
+    /// (v0.3 #4). Tags group case-insensitively (the spelling shown is
+    /// the first one stored, in library order) and the result is sorted
+    /// case-insensitively. This is the `library.tags` command's data,
+    /// shared with the GUI's tag filter.
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = Vec::new();
+        for list in &self.lists {
+            for item in &list.items {
+                for tag in &item.tags {
+                    match out
+                        .iter_mut()
+                        .find(|(t, _)| t.to_lowercase() == tag.to_lowercase())
+                    {
+                        Some((_, n)) => *n += 1,
+                        None => out.push((tag.clone(), 1)),
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|a| a.0.to_lowercase());
+        out
+    }
 }
 
 /// User settings, stored in the data folder (settings.json). API keys live
@@ -489,10 +652,42 @@ pub struct Settings {
     /// (spec §7): category id -> field keys the user last exported with.
     #[serde(default)]
     pub export_fields: BTreeMap<String, Vec<String>>,
+    /// UI text size (v0.3 #14), applied as an egui zoom factor. The
+    /// serde default is `TextSize::Large` — the v0.2.1 fixed 1.3x —
+    /// so a settings file written before the choice existed loads
+    /// at exactly the size the user already had.
+    #[serde(default)]
+    pub text_size: crate::appearance::TextSize,
+    /// Grid cover scale (v0.3 #15): multiplies the base tile size.
+    /// Sanitised into the slider's range on load (`Settings::sanitized`).
+    #[serde(default = "default_cover_scale")]
+    pub cover_scale: f32,
+    /// Compact rows instead of the cover grid (v0.3 #15).
+    #[serde(default)]
+    pub rows_view: bool,
+    /// Brighter text/accents/borders on the family look (v0.3 #16).
+    #[serde(default)]
+    pub high_contrast: bool,
+    /// Automatic weekly backups (v0.3 #19): on by default.
+    #[serde(default = "default_true")]
+    pub auto_backups: bool,
+    /// Quiet "is a newer version out?" check on launch (v0.3 #18):
+    /// on by default; any failure is silent.
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
+    /// First-run setup wizard (v0.3 #20) finished or skipped. An
+    /// existing install is marked done silently at startup — the
+    /// wizard only ever opens on a genuinely fresh data folder.
+    #[serde(default)]
+    pub wizard_done: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_cover_scale() -> f32 {
+    crate::appearance::COVER_SCALE_DEFAULT
 }
 
 impl Default for Settings {
@@ -505,6 +700,13 @@ impl Default for Settings {
             drinks_auto_update: true,
             drinks_last_check: 0,
             export_fields: BTreeMap::new(),
+            text_size: crate::appearance::TextSize::default(),
+            cover_scale: crate::appearance::COVER_SCALE_DEFAULT,
+            rows_view: false,
+            high_contrast: false,
+            auto_backups: true,
+            check_for_updates: true,
+            wizard_done: false,
         }
     }
 }
@@ -518,17 +720,26 @@ impl Settings {
         !self.igdb_client_id.trim().is_empty() && !self.igdb_client_secret.trim().is_empty()
     }
 
+    /// Normalise values a hand-edited or older settings file could
+    /// carry out of range. Applied on the app's load path (and in
+    /// tests as the load contract): the cover scale is clamped to
+    /// the slider's range (v0.3 #15).
+    pub fn sanitized(mut self) -> Settings {
+        self.cover_scale = crate::appearance::clamp_cover_scale(self.cover_scale);
+        self
+    }
+
     /// Fields to pre-tick in the export dialog for a category: the remembered
     /// set if one exists, otherwise all of the category's fields.
     pub fn remembered_export_fields(&self, category: Category) -> Vec<String> {
         if let Some(saved) = self.export_fields.get(category.id()) {
-            // The v0.2 #5 pseudo-fields ("rating"/"note") are not category
-            // fields but are legitimate remembered export choices.
+            // The export pseudo-fields ("rating"/"note" from v0.2 #5,
+            // "tags"/"status" from v0.3 #4/#5) are not category fields
+            // but are legitimate remembered export choices.
             let valid: Vec<String> = saved
                 .iter()
                 .filter(|k| {
-                    k.as_str() == "rating"
-                        || k.as_str() == "note"
+                    matches!(k.as_str(), "rating" | "note" | "tags" | "status")
                         || category.fields().iter().any(|f| f.key == k.as_str())
                 })
                 .cloned()
@@ -713,6 +924,79 @@ mod tests {
         // 10 first, the two 5s in their original relative order, then the
         // two unrated in theirs.
         assert_eq!(titles, ["Top", "Mid A", "Mid B", "Unrated B", "Unrated A"]);
+    }
+
+    #[test]
+    fn tags_normalise_dedupe_sort_and_limits() {
+        // Trim, drop empties, dedupe case-insensitively (first-seen
+        // spelling wins), sort case-insensitively.
+        let out = normalise_tags(&[
+            "  Sci-Fi ".to_string(),
+            "sci-fi".to_string(),
+            String::new(),
+            "comfort".to_string(),
+            "Alien".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(out, ["Alien", "comfort", "Sci-Fi"]);
+        // Over-long tag: an error, never a silent truncation.
+        let long = "x".repeat(MAX_TAG_CHARS + 1);
+        assert!(normalise_tags(&[long]).is_err());
+        let at_limit = "x".repeat(MAX_TAG_CHARS);
+        assert!(normalise_tags(&[at_limit]).is_ok());
+        // More than the cap after dedupe: an error.
+        let many: Vec<String> = (0..=MAX_TAGS_PER_ITEM).map(|i| format!("t{i}")).collect();
+        assert!(normalise_tags(&many).is_err());
+        let at_cap: Vec<String> = (0..MAX_TAGS_PER_ITEM).map(|i| format!("t{i}")).collect();
+        assert_eq!(normalise_tags(&at_cap).unwrap().len(), MAX_TAGS_PER_ITEM);
+    }
+
+    #[test]
+    fn status_ids_labels_and_options() {
+        assert_eq!(ItemStatus::from_id("want"), Some(ItemStatus::Want));
+        assert_eq!(ItemStatus::from_id("tried"), Some(ItemStatus::Tried));
+        assert_eq!(ItemStatus::from_id("owned"), Some(ItemStatus::Owned));
+        assert_eq!(ItemStatus::from_id("bogus"), None);
+        // Serde shape is the bare id.
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Tried).unwrap(),
+            "\"tried\""
+        );
+        assert_eq!(
+            ItemStatus::Want.label_for(Category::Movies),
+            "Want to watch"
+        );
+        assert_eq!(ItemStatus::Tried.label_for(Category::Books), "Read");
+        assert_eq!(ItemStatus::Tried.label_for(Category::Podcasts), "Heard");
+        assert_eq!(
+            ItemStatus::Want.label_for(Category::BoardGames),
+            "Want to play"
+        );
+        assert_eq!(ItemStatus::Tried.label_for(Category::Sodas), "Tried");
+        assert_eq!(ItemStatus::Owned.label_for(Category::Sodas), "Own it");
+        // Drinks never offer Owned; everything else offers all three.
+        assert_eq!(
+            ItemStatus::options_for(Category::EnergyDrinks),
+            [ItemStatus::Want, ItemStatus::Tried]
+        );
+        assert_eq!(ItemStatus::options_for(Category::Movies).len(), 3);
+    }
+
+    #[test]
+    fn tag_counts_group_case_insensitively_and_sort() {
+        let mut lib = Library::default();
+        let a = lib.new_list("Films", Category::Movies, false);
+        let b = lib.new_list("More films", Category::Movies, false);
+        let mut i1 = item(lib.alloc_item_id(), "Alien");
+        i1.tags = vec!["Sci-Fi".to_string()];
+        let mut i2 = item(lib.alloc_item_id(), "Arrival");
+        i2.tags = vec!["sci-fi".to_string(), "Drama".to_string()];
+        lib.list_mut(a).unwrap().add_item(i1);
+        lib.list_mut(b).unwrap().add_item(i2);
+        assert_eq!(
+            lib.tag_counts(),
+            [("Drama".to_string(), 1), ("Sci-Fi".to_string(), 2)]
+        );
     }
 
     #[test]

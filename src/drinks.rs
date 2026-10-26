@@ -78,14 +78,51 @@ impl DrinkEntry {
     /// Short caffeine label ("32 mg/100ml", "31.5 mg/100ml") for display
     /// and for the `caffeine` field set when a drink is added (v0.2 #7).
     pub fn caffeine_label(&self) -> Option<String> {
-        self.caffeine_mg_per_100ml.map(|mg| {
-            if mg.fract() == 0.0 {
-                format!("{} mg/100ml", mg as i64)
-            } else {
-                format!("{mg:.1} mg/100ml")
-            }
-        })
+        self.caffeine_mg_per_100ml.map(format_caffeine_label)
     }
+}
+
+/// Format a caffeine content (mg per 100 ml) as the label stored in a
+/// drink item's `caffeine` field: "32 mg/100ml", "31.5 mg/100ml".
+/// Shared by the pack entries above and the barcode lookup (#11), so
+/// every caffeine field in the app is written the same way — and
+/// [`caffeine_value`] can read them all back.
+pub fn format_caffeine_label(mg: f64) -> String {
+    if mg.fract() == 0.0 {
+        format!("{} mg/100ml", mg as i64)
+    } else {
+        format!("{mg:.1} mg/100ml")
+    }
+}
+
+/// The numeric caffeine content (mg per 100 ml) of an item, parsed from
+/// the leading number of its `caffeine` field ("32 mg/100ml" → 32.0,
+/// "31.5 mg/100ml" → 31.5). `None` when the item carries no caffeine
+/// field or the value does not start with a number ("caffeine free" is
+/// not a number). Drives the caffeine sort + filter (v0.3 #13).
+pub fn caffeine_value(item: &crate::model::Item) -> Option<f64> {
+    let text = item.field("caffeine")?.trim();
+    let digits: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// "Tried it" progress for one drinks list (v0.3 #12): how many of its
+/// items carry the `tried` status, out of the list's total. Per-list by
+/// design — drink entries carry no pack key, so there is nothing to
+/// count pack-wide against.
+pub fn tried_progress(list: &crate::model::FavList) -> (usize, usize) {
+    let tried = list
+        .items
+        .iter()
+        .filter(|i| i.status == Some(crate::model::ItemStatus::Tried))
+        .count();
+    (tried, list.items.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1033,6 +1070,42 @@ mod tests {
         let e = filter_product(&r).unwrap();
         assert_eq!(e.caffeine_mg_per_100ml, Some(32.0));
         assert_eq!(e.caffeine_label().as_deref(), Some("32 mg/100ml"));
+    }
+
+    #[test]
+    fn caffeine_value_parses_the_stored_label() {
+        use crate::model::{Category, FavList, Item, ItemStatus};
+        let mut item = Item::new(1, "Zap");
+        assert_eq!(caffeine_value(&item), None); // no field at all
+        item.fields.insert("caffeine".into(), "32 mg/100ml".into());
+        assert_eq!(caffeine_value(&item), Some(32.0));
+        item.fields
+            .insert("caffeine".into(), "31.5 mg/100ml".into());
+        assert_eq!(caffeine_value(&item), Some(31.5));
+        item.fields.insert("caffeine".into(), "180".into());
+        assert_eq!(caffeine_value(&item), Some(180.0));
+        item.fields
+            .insert("caffeine".into(), "caffeine free".into());
+        assert_eq!(caffeine_value(&item), None);
+        item.fields.insert("caffeine".into(), "  ".into());
+        assert_eq!(caffeine_value(&item), None); // blank counts as absent
+
+        // tried_progress counts only the `tried` status, over all items.
+        let mut list = FavList::new(1, "Energy", Category::EnergyDrinks, false);
+        assert_eq!(tried_progress(&list), (0, 0));
+        let mut a = Item::new(2, "A");
+        a.status = Some(ItemStatus::Tried);
+        let mut b = Item::new(3, "B");
+        b.status = Some(ItemStatus::Want);
+        list.items.push(a);
+        list.items.push(b);
+        list.items.push(Item::new(4, "C"));
+        assert_eq!(tried_progress(&list), (1, 3));
+        // The label formatter round-trips through caffeine_value.
+        let mut d = Item::new(5, "D");
+        d.fields
+            .insert("caffeine".into(), format_caffeine_label(31.5));
+        assert_eq!(caffeine_value(&d), Some(31.5));
     }
 
     #[test]
