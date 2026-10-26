@@ -27,6 +27,12 @@ Everything is stored on your own PC, in a folder next to the program.
   in several lists and merges it, and every entry can carry your own
   1–10 rating and a short note. A recovery journal guards your library
   if its file is ever damaged.
+- **Tags, status, and smart views.** Every entry can carry free-form
+  tags and a want/done/own-it status (the words adapt per category);
+  lists filter by both, global search includes them, and three
+  sidebar smart views — Top Rated, Recently Added, Needs a Rating —
+  pull entries from across all your lists. Stuck for a choice?
+  "Pick for me" picks a random favorite for you.
 - **Text exports** (`.txt` and Markdown) with a header and only the details
   you tick — your tick choices are remembered. Markdown exports include the
   cover images in a companion folder.
@@ -42,7 +48,14 @@ Everything is stored on your own PC, in a folder next to the program.
   everything into a single ZIP (data + covers). Importing merges: it adds
   what's in the file and never deletes or overwrites what you already have.
   Diary, ratings, and library CSV exports can be imported the same
-  merge-only way.
+  merge-only way. Removed entries wait 30 days in a Trash view with a
+  one-click restore, and the app keeps its own weekly backups (the
+  newest four) that can be restored from Settings.
+- **Make it yours.** Text size (Comfortable / Large / Extra large), a
+  cover-size slider, a compact rows view, a high-contrast option,
+  and drag-an-image-onto-a-cover to set artwork. A quiet launch-time
+  check tells you in the status bar when a newer version is out —
+  nothing is ever downloaded automatically.
 - **Energy drinks & sodas work offline.** They are looked up in a drinks
   database built into the program (compiled from Open Food Facts data),
   which can silently update itself and can also be updated by hand in
@@ -79,9 +92,9 @@ The compile pipeline lives in `tools/drinks-db/`.
 Two downloads on the [latest release](https://github.com/SeanShaffer88/FaveLists/releases/latest)
 (Windows 10/11, 64-bit) — pick whichever suits you:
 
-- **FaveLists-Setup-v0.2.0-x64.exe** — a per-user installer (no admin prompt).
+- **FaveLists-Setup-v0.3.0-x64.exe** — a per-user installer (no admin prompt).
   Installs for your account only and adds a Start menu entry.
-- **FaveLists-v0.2.0-portable.zip** — the portable build: the exe, the
+- **FaveLists-v0.3.0-portable.zip** — the portable build: the exe, the
   license, and a short PORTABLE note in one zip. Unzip anywhere and run;
   the drinks database is built in, and your lists are stored in a
   `FaveListsData` folder next to the exe.

@@ -1,5 +1,100 @@
 # Changelog
 
+## v0.3.0 — 2026-10-25
+
+The v0.3 program: 20 enhancements in six slices (tracker in
+`docs/PROGRAM-v0.3.md`), stacked on the v0.2 foundation. This release
+also folds in the three v0.2.1 field-test fixes, which were built but
+never released separately (listed at the end). Existing libraries
+load unchanged — nothing about your lists or data folder moves.
+
+- **Tags on every entry:** give any entry free-form tags, filter a
+  list by tag, see every tag in your library with its count, and find
+  entries by their tags in global search. Tags also ride along when
+  duplicate entries are merged, and can be included in text and
+  Markdown exports.
+- **A status on every entry:** mark entries as wanted, done, or
+  owned — the words adapt to the category ("Want to watch / Watched /
+  Own it" for movies, "Want to read / Read / Own it" for books, and so
+  on) — and filter lists and search results by status.
+- **Smart views:** three new sidebar views — Top Rated, Recently
+  Added, and Needs a Rating — pull entries from across all your
+  lists; click any entry to jump straight to it in its list.
+- **Share cards for smart views:** any smart view can be exported
+  as a share card, headed with the view's name.
+- **Pick for me:** can't decide? One click picks a random favorite
+  from a list, a whole category, a smart view, or your entire
+  library, with a short reveal before it settles.
+- **CSV and JSON export:** export any list to a spreadsheet-ready
+  CSV file with every detail included, or export the whole library
+  as one CSV file or as a JSON file in the app's own format (the
+  round-trip partner of CSV import).
+- **Paste-a-list import:** paste a plain list of titles, one per
+  line; the app matches each line against the online catalogs and
+  shows a review screen — matched, manual, or already present —
+  before anything is added, all in a single undo step.
+- **Smarter duplicate finding:** the duplicate finder now also
+  groups near-identical titles — "Part II" next to "Part 2",
+  edition variants, and small typos — as possible duplicates
+  (sequels are never grouped by mistake).
+- **Add drinks by barcode:** on a drinks list, type or scan a
+  barcode and the app looks the product up and fills in its name,
+  brand, flavour, and caffeine for you.
+- **Tried it, for drinks:** mark a drink as tried with one click in
+  its details, and watch the "Tried X of Y" progress at the top of
+  each drinks list.
+- **Caffeine sort and filter:** sort a drinks list by caffeine
+  content — strongest first — or filter it down to the drinks at
+  or above a caffeine level you set.
+- **Missing-cover sweep:** a new sidebar screen lists every entry
+  that has no cover; fetch the missing covers one at a time or all
+  at once, without leaving the screen.
+- **Text size setting:** Settings now offers Comfortable, Large,
+  and Extra large text; the choice applies immediately and is
+  remembered. Existing users keep Large — the size the app already
+  used.
+- **Cover size + rows view:** a slider in Settings scales the
+  cover grid up or down, and a Rows toggle (in Settings or right
+  in the list header) switches a list to compact rows — cover,
+  title, rating, and status on one line — for long lists.
+- **High-contrast option:** a Settings switch keeps the black/red
+  look but pushes text, accents, and borders brighter so edges
+  read clearly.
+- **Drop a cover on it:** drag an image file onto a cover and it
+  becomes that entry's cover (dropping elsewhere in the window
+  uses the selected entry); pasting an image file's path while an
+  entry is selected works too.
+- **Trash with restore:** removing an entry no longer deletes it
+  outright — it waits in a Trash view for 30 days, with everything
+  (rating, note, tags, status) intact, and one click puts it back.
+  Emptying the trash is explicit, and undo still brings a removal
+  back instantly.
+- **Automatic backups:** the app now keeps its own rolling
+  backups — a full backup once a week, the newest four kept — and
+  any of them can be restored from Settings (restoring merges,
+  never replaces). A "Back up now" button lives there too.
+- **Update check:** on launch the app quietly checks the project's
+  releases page; when a newer version exists, the status bar shows
+  a small "vX available" link. Nothing is ever downloaded
+  automatically, and a failed check shows nothing.
+- **First-run setup wizard:** a fresh install opens a short
+  welcome walkthrough — optional API keys (with links to get
+  them), a look at where your data lives — that can be skipped in
+  one click and reopened any time from Settings. Existing users
+  never see it unasked.
+
+Also folded in — the v0.2.1 field-test fixes (built after the first
+v0.2.0 field test, released here for the first time):
+
+- **Get API key links in Settings:** each API key field — TMDB, Twitch
+  Client ID, and Twitch Client Secret — now has a "Get API key ↗" link
+  beside it that opens the right sign-up page in your browser.
+- **Move data folder note:** Settings now says plainly, next to the Move
+  data folder button, that moving is safe — everything in the data
+  folder moves with it and nothing is left behind or lost.
+- **Larger text:** the whole app renders larger by default (this
+  became the Large choice of the new Text size setting above).
+
 ## v0.2.0 — 2026-10-25
 
 The v0.2 program: 10 enhancements (adopted 2026-10-25; tracker in
