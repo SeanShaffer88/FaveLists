@@ -1,0 +1,48 @@
+{
+  "lists": [
+    {
+      "id": 1,
+      "name": "Best films",
+      "category": "Movies",
+      "ranked": true,
+      "items": [
+        {
+          "id": 1,
+          "title": "Alien",
+          "fields": {
+            "director": "Ridley Scott",
+            "genre": "Horror, Sci-Fi",
+            "year": "1979"
+          },
+          "provider_id": "348",
+          "source": "tmdb",
+          "cover": null,
+          "rating": 9,
+          "note": "The chestburster still works.",
+          "tags": [
+            "sci-fi"
+          ],
+          "status": "owned",
+          "added_at": 1761350400
+        },
+        {
+          "id": 2,
+          "title": "The Princess Bride",
+          "fields": {},
+          "provider_id": null,
+          "source": "manual",
+          "cover": null,
+          "rating": null,
+          "note": "",
+          "tags": [],
+          "status": null,
+          "added_at": 1761436800
+        }
+      ],
+      "created_at": 1761350400
+    }
+  ],
+  "next_list_id": 2,
+  "next_item_id": 3,
+  "trash": []
+}
