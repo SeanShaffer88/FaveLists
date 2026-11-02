@@ -9,6 +9,15 @@ use std::collections::BTreeMap;
 /// latest FaveLists GitHub release.
 pub const DEFAULT_DRINKS_UPDATE_URL: &str =
     "https://github.com/SeanShaffer88/FaveLists/releases/latest/download/drinks.json";
+
+/// Current format version of `library.json` (stamped since v0.4.0).
+/// Files written before the stamp existed are version 0: they load
+/// unchanged and migrate up in memory (see `crate::store`); saving
+/// always writes this version, and a file declaring a higher version
+/// is refused rather than mangled.
+pub const LIBRARY_SCHEMA_VERSION: u32 = 1;
+/// Same, for `settings.json`.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -531,6 +540,11 @@ pub fn parse_year(s: &str) -> Option<i64> {
 /// The whole library: all lists plus id counters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Library {
+    /// File-format version ([`LIBRARY_SCHEMA_VERSION`]). Absent in
+    /// files written by v0.3.0 and earlier; those load as version 0
+    /// and are migrated up by the store.
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub lists: Vec<FavList>,
     #[serde(default = "default_next_id")]
@@ -554,6 +568,7 @@ fn default_next_id() -> u64 {
 impl Default for Library {
     fn default() -> Self {
         Library {
+            schema_version: LIBRARY_SCHEMA_VERSION,
             lists: Vec::new(),
             next_list_id: 1,
             next_item_id: 1,
@@ -630,6 +645,11 @@ impl Library {
 /// here and ONLY here — never in code, never in the repo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    /// File-format version ([`SETTINGS_SCHEMA_VERSION`]). Absent in
+    /// files written by v0.3.0 and earlier; those load as version 0
+    /// and are migrated up by the store.
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub tmdb_api_key: String,
     #[serde(default)]
@@ -693,6 +713,7 @@ fn default_cover_scale() -> f32 {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            schema_version: SETTINGS_SCHEMA_VERSION,
             tmdb_api_key: String::new(),
             igdb_client_id: String::new(),
             igdb_client_secret: String::new(),
