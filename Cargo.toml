@@ -1,6 +1,6 @@
 [package]
 name = "favelists"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Sean Shaffer"]
@@ -43,8 +43,11 @@ rfd = "0.15"
 [target.'cfg(not(windows))'.dependencies]
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit", "x11"] }
 
+# Pinned release profile (Contract V4.0): size-optimised, one codegen
+# unit, symbols stripped, abort on panic.
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
