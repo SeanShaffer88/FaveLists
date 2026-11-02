@@ -1,0 +1,10 @@
+# Static C runtime for the Windows x64 build (Contract V4.0 §6:
+# static runtime linkage is mandatory for t3). The gnu target
+# accepts the standard `+crt-static` target feature: it makes
+# rustc link the compiler runtime pieces (libgcc, libstdc++,
+# winpthread) statically instead of importing their DLLs.
+# Verified by inspecting the release exe's DLL imports with
+# `x86_64-w64-mingw32-objdump -p` — see the Project Manifest
+# in AGENTS.md.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
