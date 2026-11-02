@@ -1,10 +1,14 @@
 //! Persistence: the library and settings live as JSON in a data folder that
-//! defaults to `FaveListsData/` NEXT TO THE EXE (spec §5). A tiny pointer
+//! defaults to `FaveListsData/` NEXT TO THE EXE (spec §5). Both files carry
+//! a `schema_version` (v0.4.0): files written before the stamp are version
+//! 0, migrate up on load with their original bytes preserved beside them
+//! (`<file>.v0-backup`), and a file from a newer FaveLists is refused
+//! rather than mangled. A tiny pointer
 //! file (`favelists-location.json`) sits next to the exe; when the user
 //! relocates the data folder, the pointer is rewritten and all existing data
 //! is moved automatically.
 
-use crate::model::{Library, Settings};
+use crate::model::{Library, Settings, LIBRARY_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -117,8 +121,30 @@ impl Store {
     }
 
     pub fn load_library(&self) -> io::Result<Library> {
-        let mut library = load_json_or_default(&self.library_path())?;
+        let mut library = match fs::read_to_string(self.library_path()) {
+            Ok(text) => self.parse_library(&text, &self.library_path())?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Library::default(),
+            Err(e) => return Err(e),
+        };
         purge_trash(&mut library);
+        Ok(library)
+    }
+
+    /// Parse library JSON at any schema version this build
+    /// understands. A missing `schema_version` is version 0 (every
+    /// release up to v0.3.0): the data migrates up in memory, the
+    /// original file is first preserved beside itself (see
+    /// [`preserve_pre_migration_copy`]), and the migration becomes
+    /// permanent on the next save. A version newer than this build
+    /// understands is refused, never mangled.
+    fn parse_library(&self, text: &str, path: &Path) -> io::Result<Library> {
+        let declared = check_not_newer(text, LIBRARY_SCHEMA_VERSION, LIBRARY_FILE)?;
+        let mut library: Library = serde_json::from_str(text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if declared < LIBRARY_SCHEMA_VERSION {
+            preserve_pre_migration_copy(path);
+            library.schema_version = LIBRARY_SCHEMA_VERSION;
+        }
         Ok(library)
     }
 
@@ -132,24 +158,32 @@ impl Store {
     pub fn load_library_recovering(&self) -> io::Result<LibraryLoad> {
         let mut main_error: Option<io::Error> = None;
         match fs::read_to_string(self.library_path()) {
-            Ok(text) => match serde_json::from_str::<Library>(&text) {
-                Ok(mut library) => {
-                    purge_trash(&mut library);
-                    return Ok(LibraryLoad {
-                        library,
-                        recovered_from_journal: false,
-                    });
+            Ok(text) => {
+                // A newer-format main file is a hard stop, not a
+                // recovery case: quietly loading the journal (or
+                // defaults) over it and saving later would lose
+                // whatever the newer format holds.
+                check_not_newer(&text, LIBRARY_SCHEMA_VERSION, LIBRARY_FILE)?;
+                match self.parse_library(&text, &self.library_path()) {
+                    Ok(mut library) => {
+                        purge_trash(&mut library);
+                        return Ok(LibraryLoad {
+                            library,
+                            recovered_from_journal: false,
+                        });
+                    }
+                    Err(e) => {
+                        main_error = Some(e);
+                    }
                 }
-                Err(e) => {
-                    main_error = Some(io::Error::new(io::ErrorKind::InvalidData, e));
-                }
-            },
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => main_error = Some(e),
         }
         // The main file is missing or unusable: try the journal.
         if let Ok(text) = fs::read_to_string(self.journal_path()) {
-            if let Ok(mut library) = serde_json::from_str::<Library>(&text) {
+            check_not_newer(&text, LIBRARY_SCHEMA_VERSION, JOURNAL_FILE)?;
+            if let Ok(mut library) = self.parse_library(&text, &self.journal_path()) {
                 purge_trash(&mut library);
                 return Ok(LibraryLoad {
                     library,
@@ -168,15 +202,35 @@ impl Store {
     /// `persist()` and the JSON channel's post-mutation save come through
     /// here, so the journal can never miss a state the main file has.
     pub fn save_library(&self, lib: &Library) -> io::Result<()> {
+        refuse_save_over_newer(&self.library_path(), LIBRARY_SCHEMA_VERSION, LIBRARY_FILE)?;
         save_json_atomic(&self.library_path(), lib)?;
         save_json_atomic(&self.journal_path(), lib)
     }
 
     pub fn load_settings(&self) -> io::Result<Settings> {
-        load_json_or_default(&self.settings_path())
+        let path = self.settings_path();
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                let declared = check_not_newer(&text, SETTINGS_SCHEMA_VERSION, SETTINGS_FILE)?;
+                let mut settings: Settings = serde_json::from_str(&text)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                if declared < SETTINGS_SCHEMA_VERSION {
+                    preserve_pre_migration_copy(&path);
+                    settings.schema_version = SETTINGS_SCHEMA_VERSION;
+                }
+                Ok(settings)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn save_settings(&self, settings: &Settings) -> io::Result<()> {
+        refuse_save_over_newer(
+            &self.settings_path(),
+            SETTINGS_SCHEMA_VERSION,
+            SETTINGS_FILE,
+        )?;
         save_json_atomic(&self.settings_path(), settings)
     }
 
@@ -217,14 +271,58 @@ fn purge_trash(library: &mut Library) {
     crate::trash::purge_expired(&mut library.trash, crate::model::now_unix());
 }
 
-fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
-    match fs::read_to_string(path) {
-        Ok(text) => {
-            serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e),
+/// The `schema_version` a stored JSON text declares, or `None` when
+/// the field is absent or not a whole number (a hand-edited file) —
+/// loaders treat `None` as version 0, the pre-versioning format.
+pub fn declared_schema_version(text: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+/// Check a stored file's declared schema version against what this
+/// build understands, returning the declared version (0 when the
+/// field is absent). A file from a newer FaveLists is refused with a
+/// plain error: loading it anyway would silently drop whatever the
+/// newer format added, and the next save would overwrite it.
+fn check_not_newer(text: &str, current: u32, file_label: &str) -> io::Result<u32> {
+    let declared = declared_schema_version(text).unwrap_or(0);
+    if declared > current {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{file_label} declares schema_version {declared}, which is newer than this build understands ({current}) — it was written by a newer FaveLists and has NOT been changed"
+            ),
+        ));
     }
+    Ok(declared)
+}
+
+/// Keep the original bytes of a pre-versioning file safe before its
+/// contents are migrated up and (on the next save) rewritten at the
+/// current version: a one-time copy beside the file named
+/// `<file>.v0-backup`. Written once — an existing copy is the
+/// pristine original and is never overwritten.
+fn preserve_pre_migration_copy(path: &Path) {
+    let backup = path.with_file_name(format!(
+        "{}.v0-backup",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if !backup.exists() {
+        let _ = fs::copy(path, &backup);
+    }
+}
+
+/// Guard for the save paths: never write over a file a newer
+/// FaveLists wrote (a caller that fell back to defaults after a
+/// refused load must not be able to clobber it).
+fn refuse_save_over_newer(path: &Path, current: u32, file_label: &str) -> io::Result<()> {
+    if let Ok(text) = fs::read_to_string(path) {
+        check_not_newer(&text, current, file_label)?;
+    }
+    Ok(())
 }
 
 /// Write JSON via a temp file + rename so a crash mid-save can't corrupt the

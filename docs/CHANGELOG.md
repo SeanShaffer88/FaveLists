@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.4.0 — 2026-11-02
+
+A conformance release (Adaptive Engineering Contract V4.0, tier t3 —
+the rich-render GUI tier). No feature changes: your existing library
+loads unchanged, and nothing about your lists or data folder moves.
+
+- **Versioned data files:** `library.json` and `settings.json` now
+  carry a `schema_version`. Files written by v0.3.0 and earlier load
+  exactly as before; the first time this build reads one, it keeps a
+  pristine copy beside it (`library.json.v0-backup` /
+  `settings.json.v0-backup`) before the file is next saved in the new
+  format. A file written by a newer FaveLists is refused with a clear
+  message instead of being loaded or overwritten.
+- **Release shape:** the downloads are now named
+  `FaveLists-v0.4.0-x64-Setup.exe` and
+  `FaveLists-v0.4.0-x64-Portable.zip`, and every release carries a
+  `SHA256SUMS.txt` so downloads can be checked before running them.
+- **Static runtime:** the Windows build links its C runtime
+  statically — the exe needs no redistributable or runtime install.
+- **Documentation:** the standard project documents now live in
+  `docs/` (install, compatibility, architecture, security,
+  troubleshooting, migration, and the rest); this changelog moved
+  there with them.
+
 ## v0.3.0 — 2026-10-25
 
 The v0.3 program: 20 enhancements in six slices (tracker in

@@ -92,9 +92,9 @@ The compile pipeline lives in `tools/drinks-db/`.
 Two downloads on the [latest release](https://github.com/SeanShaffer88/FaveLists/releases/latest)
 (Windows 10/11, 64-bit) — pick whichever suits you:
 
-- **FaveLists-Setup-v0.3.0-x64.exe** — a per-user installer (no admin prompt).
+- **FaveLists-v0.4.0-x64-Setup.exe** — a per-user installer (no admin prompt).
   Installs for your account only and adds a Start menu entry.
-- **FaveLists-v0.3.0-portable.zip** — the portable build: the exe, the
+- **FaveLists-v0.4.0-x64-Portable.zip** — the portable build: the exe, the
   license, and a short PORTABLE note in one zip. Unzip anywhere and run;
   the drinks database is built in, and your lists are stored in a
   `FaveListsData` folder next to the exe.
@@ -103,7 +103,11 @@ Both are **unsigned**, so Windows SmartScreen may warn on first run — choose
 "More info" → "Run anyway". Uninstalling keeps your `FaveListsData` folder,
 so your lists survive a reinstall. The release page also carries a
 standalone `drinks.json` — that's the drinks-database update pack the app
-fetches by itself for its silent auto-update, not a download you need.
+fetches by itself for its silent auto-update, not a download you need —
+and a `SHA256SUMS.txt` with checksums for every download (see
+`docs/INSTALL.md`). The full documentation set lives in `docs/`:
+features, install, compatibility, architecture, security,
+troubleshooting, migration, and the changelog.
 
 ## Building
 

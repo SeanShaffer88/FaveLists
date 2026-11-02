@@ -1,0 +1,21 @@
+{
+  "tmdb_api_key": "",
+  "igdb_client_id": "",
+  "igdb_client_secret": "",
+  "drinks_update_url": "https://github.com/SeanShaffer88/FaveLists/releases/latest/download/drinks.json",
+  "drinks_auto_update": true,
+  "drinks_last_check": 1761350400,
+  "export_fields": {
+    "movies": [
+      "year",
+      "director"
+    ]
+  },
+  "text_size": "large",
+  "cover_scale": 1.25,
+  "rows_view": true,
+  "high_contrast": false,
+  "auto_backups": true,
+  "check_for_updates": true,
+  "wizard_done": true
+}
