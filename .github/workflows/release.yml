@@ -47,12 +47,26 @@ jobs:
           Copy-Item "dist/FaveLists-${{ github.ref_name }}-portable.exe" $stage
           Copy-Item LICENSE $stage
           Copy-Item PORTABLE.txt $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/FaveLists-${{ github.ref_name }}-portable.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/FaveLists-${{ github.ref_name }}-x64-Portable.zip"
+      - name: Checksums (SHA256SUMS.txt)
+        shell: pwsh
+        run: |
+          $files = @(
+            "dist/FaveLists-${{ github.ref_name }}-x64-Setup.exe",
+            "dist/FaveLists-${{ github.ref_name }}-x64-Portable.zip",
+            "dist/drinks.json"
+          )
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            "$hash  $(Split-Path $f -Leaf)"
+          }
+          $lines | Set-Content -Encoding ascii "dist/SHA256SUMS.txt"
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/FaveLists-Setup-${{ github.ref_name }}-x64.exe
-            dist/FaveLists-${{ github.ref_name }}-portable.zip
+            dist/FaveLists-${{ github.ref_name }}-x64-Setup.exe
+            dist/FaveLists-${{ github.ref_name }}-x64-Portable.zip
             dist/drinks.json
+            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
