@@ -64,6 +64,7 @@ pub fn export_backup(
         .collect();
     // Build a payload library containing only the chosen lists.
     let payload_lib = Library {
+        schema_version: crate::model::LIBRARY_SCHEMA_VERSION,
         lists: chosen.iter().map(|l| (*l).clone()).collect(),
         next_list_id: library.next_list_id,
         next_item_id: library.next_item_id,
