@@ -12,7 +12,6 @@
 //! is unit-testable off-Windows, like the other exports.
 
 use crate::model::{Category, FavList, Item, Library};
-use std::path::Path;
 
 /// Escape one CSV field per RFC 4180.
 pub fn csv_escape(value: &str) -> String {
@@ -167,27 +166,6 @@ pub fn library_csv(library: &Library) -> String {
     out
 }
 
-/// Write one list's CSV to `path`. Returns the number of item rows.
-pub fn write_list_csv(list: &FavList, path: &Path) -> std::io::Result<usize> {
-    std::fs::write(path, list_csv(list))?;
-    Ok(list.items.len())
-}
-
-/// Write the whole library's CSV to `path`. Returns (lists, items).
-pub fn write_library_csv(library: &Library, path: &Path) -> std::io::Result<(usize, usize)> {
-    std::fs::write(path, library_csv(library))?;
-    Ok((library.lists.len(), library.total_items()))
-}
-
-/// Write the library as JSON — its own pretty serialisation, the
-/// same shape the store writes. Returns (lists, items).
-pub fn write_library_json(library: &Library, path: &Path) -> std::io::Result<(usize, usize)> {
-    let text = serde_json::to_string_pretty(library)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, text)?;
-    Ok((library.lists.len(), library.total_items()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +243,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("library.json");
-        let (lists, items) = write_library_json(&lib, &path).unwrap();
+        let (lists, items) = (lib.lists.len(), lib.total_items());
+        std::fs::write(&path, serde_json::to_string_pretty(&lib).unwrap()).unwrap();
         assert_eq!((lists, items), (1, 1));
         let back: Library = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(back, lib);

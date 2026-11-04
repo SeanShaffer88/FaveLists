@@ -174,7 +174,7 @@ impl FaveApp {
         ui.label(
             egui::RichText::new(format!(
                 "Your lists, covers, and settings live in:\n{}",
-                self.store.data_dir.display()
+                self.store.data_dir_label()
             ))
             .small(),
         );
@@ -182,10 +182,14 @@ impl FaveApp {
         if ui.button("Move data folder…").clicked() {
             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                 match self.store.relocate(&self.base_dir, &dir) {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         self.cover_textures.clear();
-                        self.wizard.message =
-                            format!("Data moved to {}.", self.store.data_dir.display());
+                        if let Some(warning) = &outcome.cleanup_warning {
+                            self.storage_errors.push(warning.clone());
+                        }
+                        self.wizard.message = outcome.cleanup_warning.unwrap_or_else(|| {
+                            format!("Data moved to {}.", self.store.data_dir_label())
+                        });
                     }
                     Err(e) => {
                         self.wizard.message = format!("Could not move data folder: {e}");

@@ -36,6 +36,11 @@ fn dispatch(
     name: &str,
     params: Value,
 ) -> Result<Value, commands::CommandError> {
+    if name.starts_with("export.") || name == "backup.export" {
+        let base = covers.parent().unwrap();
+        let store = favelists::store::Store::open_at(base, base).unwrap();
+        return store.dispatch(lib, None, name, &params);
+    }
     let mut ctx = CommandContext::new(lib, covers);
     commands::dispatch(&mut ctx, name, &params)
 }

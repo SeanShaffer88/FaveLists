@@ -2,7 +2,7 @@
 //! rolling set of backup ZIPs — one a week, the newest four kept —
 //! under the data folder's `backups/` directory, written with the
 //! same backup machinery the manual export uses
-//! (`backup::export_backup`, whole library scope). Restoring one is
+//! (`backup::encode_backup`, whole library scope). Restoring one is
 //! the existing merge import; nothing here invents a second format.
 //!
 //! The two decision functions ([`is_due`], [`rotation_deletions`])
@@ -88,21 +88,16 @@ pub fn newest_auto_backup_time(dir: &Path) -> Option<i64> {
 /// and apply the rotation. Returns the file name written. Shared by
 /// the launch-time automatic backup and Settings' "Back up now" —
 /// they differ only in what triggered them.
-pub fn write_auto_backup(
+pub(crate) fn write_auto_backup(
     library: &Library,
-    covers_dir: &Path,
-    dir: &Path,
+    state: &crate::store::StorageState,
 ) -> Result<String, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let dir = state.backups_dir();
     let name = file_name_for(crate::model::now_unix());
-    crate::backup::export_backup(
-        library,
-        &crate::backup::BackupScope::WholeLibrary,
-        covers_dir,
-        &dir.join(&name),
-    )
-    .map_err(|e| e.to_string())?;
-    for old in rotation_deletions(&list_auto_backups(dir), AUTO_BACKUP_KEEP) {
+    state
+        .write_internal_backup(library, &name)
+        .map_err(|e| e.to_string())?;
+    for old in rotation_deletions(&list_auto_backups(&dir), AUTO_BACKUP_KEEP) {
         let _ = std::fs::remove_file(dir.join(old));
     }
     Ok(name)

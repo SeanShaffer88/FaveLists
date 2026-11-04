@@ -8,6 +8,7 @@
 //! paths.
 
 use crate::model::{iso_date, now_unix, FavList, Item};
+#[cfg(test)]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -166,48 +167,66 @@ pub fn build_md(
     build_document(list, selected_keys, true, cover_ref, now_unix())
 }
 
-/// Write a .txt export to `path`.
-pub fn write_txt(list: &FavList, selected_keys: &[String], path: &Path) -> io::Result<()> {
-    fs::write(path, build_txt(list, selected_keys))
+pub(crate) struct MarkdownPlan {
+    pub(crate) outputs: Vec<PathBuf>,
+    assets_name: String,
+    covers: Vec<(u64, String, PathBuf)>,
 }
 
-/// Write a .md export to `path`, copying covers into `<stem>_assets/`
-/// beside it. `covers_dir` is the data folder's cover cache. Returns the
-/// asset paths written (relative refs as used inside the document).
-pub fn write_md(
-    list: &FavList,
-    selected_keys: &[String],
-    path: &Path,
-    covers_dir: &Path,
-) -> io::Result<Vec<PathBuf>> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("favelists")
-        .to_string();
-    let assets_name = format!("{stem}_assets");
-    let assets_dir = path.parent().unwrap_or(Path::new(".")).join(&assets_name);
-    let mut written = Vec::new();
-    // First pass: copy assets so the document can reference what exists.
-    let mut refs: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
-    for item in &list.items {
-        if let Some(cover) = &item.cover {
-            let src = covers_dir.join(cover);
-            if src.exists() {
-                fs::create_dir_all(&assets_dir)?;
-                let dest = assets_dir.join(cover);
-                if fs::copy(&src, &dest).is_ok() {
-                    refs.insert(item.id, format!("{assets_name}/{cover}"));
-                    written.push(dest);
+impl MarkdownPlan {
+    pub(crate) fn new(list: &FavList, path: &Path, covers_dir: &Path) -> io::Result<Self> {
+        let assets_name = format!(
+            "{}_assets",
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("favelists")
+        );
+        let assets = path.parent().unwrap_or(Path::new(".")).join(&assets_name);
+        let mut plan = Self {
+            outputs: vec![path.to_path_buf(), assets.clone()],
+            assets_name,
+            covers: Vec::new(),
+        };
+        for item in &list.items {
+            if let Some(cover) = &item.cover {
+                // Cover cache references are basenames, never paths or alternate streams.
+                if cover.is_empty()
+                    || cover.contains(['/', '\\', ':'])
+                    || cover == "."
+                    || cover == ".."
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid Markdown cover reference",
+                    ));
                 }
+                let source = covers_dir.join(cover);
+                plan.outputs.push(assets.join(cover));
+                plan.covers.push((item.id, cover.clone(), source));
             }
         }
+        Ok(plan)
     }
-    let text = build_md(list, selected_keys, &|item: &Item| {
-        refs.get(&item.id).cloned()
-    });
-    fs::write(path, text)?;
-    Ok(written)
+
+    pub(crate) fn write(
+        &self,
+        list: &FavList,
+        keys: &[String],
+        outputs: &crate::store::ValidatedOutputs<'_>,
+    ) -> io::Result<Vec<PathBuf>> {
+        let mut refs = std::collections::HashMap::new();
+        let mut written = Vec::new();
+        for (i, (id, cover, source)) in self.covers.iter().enumerate() {
+            if source.try_exists()? {
+                outputs.create_dir(1)?;
+                outputs.copy(i + 2, source)?;
+                refs.insert(*id, format!("{}/{cover}", self.assets_name));
+                written.push(self.outputs[i + 2].clone());
+            }
+        }
+        outputs.write(0, build_md(list, keys, &|item| refs.get(&item.id).cloned()))?;
+        Ok(written)
+    }
 }
 
 /// Filesystem-safe file stem from a list name ("My Films!" -> "My_Films").
@@ -298,7 +317,13 @@ mod tests {
         fs::create_dir_all(&covers).unwrap();
         fs::write(covers.join("cover-1.jpg"), b"jpeg-bytes").unwrap();
         let md_path = dir.join("best.md");
-        let written = write_md(&list, &all_keys(&list), &md_path, &covers).unwrap();
+        let store = crate::store::Store::open(&dir).unwrap();
+        let plan = MarkdownPlan::new(&list, &md_path, &covers).unwrap();
+        let written = store.with_storage(|state| {
+            let outputs = state.validate_external_outputs(&plan.outputs).unwrap();
+            plan.write(&list, &all_keys(&list), &outputs).unwrap()
+        });
+        drop(store);
         assert_eq!(written.len(), 1);
         let text = fs::read_to_string(&md_path).unwrap();
         assert!(text.contains("# Best Sci-Fi Films"));
@@ -307,7 +332,7 @@ mod tests {
         assert!(dir.join("best_assets/cover-1.jpg").exists());
         // Arrival has no cover -> no image line for it.
         assert_eq!(text.matches("![cover]").count(), 1);
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

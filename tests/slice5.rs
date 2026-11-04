@@ -38,6 +38,11 @@ fn dispatch(
     name: &str,
     params: Value,
 ) -> Result<Value, commands::CommandError> {
+    if name.starts_with("export.") || name == "backup.export" {
+        let base = covers.parent().unwrap();
+        let store = favelists::store::Store::open_at(base, base).unwrap();
+        return store.dispatch(lib, None, name, &params);
+    }
     let mut ctx = CommandContext::new(lib, covers);
     commands::dispatch(&mut ctx, name, &params)
 }
@@ -115,7 +120,7 @@ fn import_diary_fixture_new_list_counts_ratings_and_duplicate() {
     assert_eq!(list.items[0].field("year"), Some("2019"));
     assert_eq!(list.items[1].rating, Some(6));
     assert_eq!(list.items[2].rating, None);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +153,7 @@ fn import_library_fixture_maps_author_and_zero_rating() {
     assert_eq!(list.items[0].field("year"), Some("2016"));
     assert_eq!(list.items[1].rating, None, "My Rating 0 means unrated");
     assert_eq!(list.items[2].rating, Some(8), "4 stars -> 8");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +214,7 @@ fn import_ratings_fixture_new_mode_splits_into_two_lists() {
     // The mini-series row mapped to TV too, genres kept, 8 as-is.
     assert_eq!(shows.items[1].rating, Some(8));
     assert_eq!(shows.items[1].field("genre"), Some("Drama, Mystery"));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +253,7 @@ fn import_ratings_into_existing_movies_list_skips_tv_rows() {
         titles(&lib, 1),
         ["The Clockwork Harbor", "The Last Cartographer"]
     );
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -279,7 +284,7 @@ fn import_twice_into_same_list_counts_every_row_as_duplicate() {
     assert_eq!(r["skipped_duplicates"], 4, "all four titled rows");
     assert_eq!(r["invalid"], 1);
     assert_eq!(lib.lists[0].items.len(), 3, "nothing was added or replaced");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -307,7 +312,7 @@ fn import_single_category_file_into_wrong_category_list_is_rejected() {
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
     assert_eq!(lib, before, "a rejected import must not mutate");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -333,7 +338,7 @@ fn import_unknown_headers_error_lists_what_was_found() {
         err.message
     );
     assert!(lib.lists.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -351,7 +356,7 @@ fn import_missing_file_is_an_io_error() {
     )
     .unwrap_err();
     assert_eq!(err.code, "io");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +387,7 @@ fn import_is_exactly_one_undo_step() {
     assert_eq!(r["undone"], true);
     assert_eq!(r["command"], "import.csv");
     assert_eq!(lib, before, "undo restores the exact pre-import state");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +441,8 @@ fn import_csv_channel_matches_registry() {
     let persisted = store.load_library().unwrap();
     assert_eq!(persisted.lists.len(), 1);
     assert_eq!(persisted.lists[0].items.len(), 3);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +511,7 @@ fn share_card_writes_exact_canvas_png_and_reports_missing_cover() {
         img.pixels().any(|p| *p != favelists::render::BG),
         "the card must not be a blank background"
     );
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -538,7 +544,7 @@ fn share_card_count_clamps_to_card_range() {
     )
     .unwrap();
     assert_eq!(r["entries"], 1);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -562,5 +568,5 @@ fn share_card_empty_list_is_a_clean_error() {
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }

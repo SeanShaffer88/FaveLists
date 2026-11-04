@@ -37,7 +37,6 @@ pub fn run(
 ) -> std::io::Result<()> {
     let store = Store::open(base_dir)?;
     let mut library = store.load_library_recovering()?.library;
-    let covers_dir = store.covers_dir();
     let mut history = History::new();
     let mut line = String::new();
     loop {
@@ -49,7 +48,7 @@ pub fn run(
         if trimmed.is_empty() {
             continue;
         }
-        let response = handle_line(&mut library, &covers_dir, &store, &mut history, trimmed);
+        let response = handle_line(&mut library, &store, &mut history, trimmed);
         serde_json::to_writer(&mut output, &response)?;
         output.write_all(b"\n")?;
         output.flush()?;
@@ -63,7 +62,6 @@ fn error_response(id: Value, code: &str, message: &str) -> Value {
 
 fn handle_line(
     library: &mut crate::model::Library,
-    covers_dir: &Path,
     store: &Store,
     history: &mut History,
     line: &str,
@@ -78,21 +76,28 @@ fn handle_line(
     };
     let name = name.to_string();
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    let result = {
-        let mut ctx = CommandContext::with_history(library, covers_dir, history);
-        commands::dispatch(&mut ctx, &name, &params)
-    };
-    match result {
-        Ok(result) => {
-            if commands::is_mutating(&name) {
-                if let Err(e) = store.save_library(library) {
-                    return error_response(id, "io", &format!("could not save library: {e}"));
-                }
-            }
-            json!({"ok": true, "id": id, "result": result})
+    store.with_storage(|state| {
+        if let Err(e) = state.require_library_writable() {
+            return error_response(id, "io", &e.to_string());
         }
-        Err(e) => error_response(id, e.code, &e.message),
-    }
+        let covers_dir = state.covers_dir();
+        let result = {
+            let mut ctx = CommandContext::with_history(library, &covers_dir, history);
+            ctx.attach_storage(state);
+            commands::dispatch(&mut ctx, &name, &params)
+        };
+        match result {
+            Ok(result) => {
+                if commands::is_mutating(&name) {
+                    if let Err(e) = state.save_library(library) {
+                        return error_response(id, "io", &format!("could not save library: {e}"));
+                    }
+                }
+                json!({"ok": true, "id": id, "result": result})
+            }
+            Err(e) => error_response(id, e.code, &e.message),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -41,8 +41,8 @@ fn with_schema_version(fixture: &str, version: u32) -> String {
 #[test]
 fn settings_v030_loads_migrates_and_round_trips_at_v1() {
     let dir = temp_dir("settings");
-    let store = Store::open_at(&dir).unwrap();
-    fs::write(store.settings_path(), SETTINGS_V030).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
+    fs::write(dir.join("settings.json"), SETTINGS_V030).unwrap();
 
     let settings = store.load_settings().unwrap();
     assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
@@ -63,18 +63,19 @@ fn settings_v030_loads_migrates_and_round_trips_at_v1() {
     // Saving stamps the current version; loading that file is a
     // no-op round-trip and never touches the preserved original.
     store.save_settings(&settings).unwrap();
-    let on_disk = fs::read_to_string(store.settings_path()).unwrap();
+    let on_disk = fs::read_to_string(dir.join("settings.json")).unwrap();
     assert!(on_disk.contains("\"schema_version\": 1"));
     assert_eq!(store.load_settings().unwrap(), settings);
     assert_eq!(fs::read_to_string(&backup).unwrap(), SETTINGS_V030);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn library_v030_loads_migrates_and_round_trips_at_v1() {
     let dir = temp_dir("library");
-    let store = Store::open_at(&dir).unwrap();
-    fs::write(store.library_path(), LIBRARY_V030).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
+    fs::write(dir.join("library.json"), LIBRARY_V030).unwrap();
 
     let library = store.load_library().unwrap();
     assert_eq!(library.schema_version, LIBRARY_SCHEMA_VERSION);
@@ -92,51 +93,57 @@ fn library_v030_loads_migrates_and_round_trips_at_v1() {
     assert_eq!(fs::read_to_string(&backup).unwrap(), LIBRARY_V030);
 
     store.save_library(&library).unwrap();
-    let on_disk = fs::read_to_string(store.library_path()).unwrap();
+    let on_disk = fs::read_to_string(dir.join("library.json")).unwrap();
     assert!(on_disk.contains("\"schema_version\": 1"));
     assert_eq!(store.load_library().unwrap(), library);
     // The recovering load agrees and reports no journal recovery.
     let load = store.load_library_recovering().unwrap();
     assert!(!load.recovered_from_journal);
     assert_eq!(load.library, library);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn newer_settings_are_refused_and_never_overwritten() {
     let dir = temp_dir("settings-newer");
-    let store = Store::open_at(&dir).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
     let newer = with_schema_version(SETTINGS_V030, 99);
-    fs::write(store.settings_path(), &newer).unwrap();
+    fs::write(dir.join("settings.json"), &newer).unwrap();
 
     assert!(store.load_settings().is_err());
     // A caller holding defaults must not be able to clobber it.
     assert!(store.save_settings(&Settings::default()).is_err());
-    assert_eq!(fs::read_to_string(store.settings_path()).unwrap(), newer);
+    assert_eq!(
+        fs::read_to_string(dir.join("settings.json")).unwrap(),
+        newer
+    );
     assert!(!dir.join("settings.json.v0-backup").exists());
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn newer_library_is_refused_by_both_load_paths() {
     let dir = temp_dir("library-newer");
-    let store = Store::open_at(&dir).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
     let newer = with_schema_version(LIBRARY_V030, 99);
-    fs::write(store.library_path(), &newer).unwrap();
+    fs::write(dir.join("library.json"), &newer).unwrap();
 
     assert!(store.load_library().is_err());
     // Not a journal-recovery case either: it must surface, not fall
     // back to older state.
     assert!(store.load_library_recovering().is_err());
     assert!(store.save_library(&Library::default()).is_err());
-    assert_eq!(fs::read_to_string(store.library_path()).unwrap(), newer);
-    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(fs::read_to_string(dir.join("library.json")).unwrap(), newer);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn current_version_files_load_without_a_backup_copy() {
     let dir = temp_dir("current");
-    let store = Store::open_at(&dir).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
     store.save_settings(&Settings::default()).unwrap();
     store.save_library(&Library::default()).unwrap();
 
@@ -151,5 +158,6 @@ fn current_version_files_load_without_a_backup_copy() {
     // Nothing migrated, so nothing was preserved.
     assert!(!dir.join("settings.json.v0-backup").exists());
     assert!(!dir.join("library.json.v0-backup").exists());
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }

@@ -14,7 +14,10 @@ fn main() -> eframe::Result<()> {
     if std::env::args().any(|a| a == "--json-channel") {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
-        let _ = favelists::json_channel::run(&base_dir, stdin.lock(), stdout.lock());
+        if let Err(error) = favelists::json_channel::run(&base_dir, stdin.lock(), stdout.lock()) {
+            eprintln!("FaveLists JSON channel refused: {error}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
     let options = eframe::NativeOptions {
@@ -35,7 +38,17 @@ fn main() -> eframe::Result<()> {
             // creation callback — is in effect before the first frame
             // renders. A settings file from before the choice existed
             // loads as Large, the old fixed 1.3x.
-            let app = favelists::app::FaveApp::new(base_dir);
+            let app = match favelists::app::FaveApp::new(base_dir) {
+                Ok(app) => app,
+                Err(error) => {
+                    rfd::MessageDialog::new()
+                        .set_title("FaveLists could not open the data folder")
+                        .set_description(error.to_string())
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                    return Err(error.into());
+                }
+            };
             cc.egui_ctx.set_zoom_factor(app.startup_zoom_factor());
             cc.egui_ctx.set_visuals(app.startup_visuals());
             Ok(Box::new(app))

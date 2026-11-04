@@ -51,11 +51,11 @@ const PAYLOAD_NAME: &str = "library.json";
 /// Export the scoped lists (with their covers) from `library` to a ZIP at
 /// `zip_path`. `covers_dir` is the data folder's cover cache. Returns how
 /// many lists were written.
-pub fn export_backup(
+pub fn encode_backup<W: Write + io::Seek>(
     library: &Library,
     scope: &BackupScope,
     covers_dir: &Path,
-    zip_path: &Path,
+    writer: W,
 ) -> io::Result<usize> {
     let chosen: Vec<&crate::model::FavList> = library
         .lists
@@ -80,8 +80,7 @@ pub fn export_backup(
     let text = serde_json::to_string_pretty(&payload)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let file = fs::File::create(zip_path)?;
-    let mut zip = zip::ZipWriter::new(file);
+    let mut zip = zip::ZipWriter::new(writer);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     zip.start_file(PAYLOAD_NAME, options)?;
@@ -105,6 +104,16 @@ pub fn export_backup(
     }
     zip.finish()?;
     Ok(chosen.len())
+}
+
+#[cfg(test)]
+fn export_backup(
+    library: &Library,
+    scope: &BackupScope,
+    covers: &Path,
+    path: &Path,
+) -> io::Result<usize> {
+    encode_backup(library, scope, covers, fs::File::create(path)?)
 }
 
 /// A parsed backup: the payload library plus `(file name, bytes)` covers.
