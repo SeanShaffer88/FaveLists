@@ -11,7 +11,7 @@ only of the covers/posters — pick from lots of arrangements, shuffle the
 covers around in a preview until it looks right, and share the image anywhere.
 Everything is stored on your own PC, in a folder next to the program.
 
-## Library consumer migration (pending qualification)
+## Library consumer migration
 
 The storage-safety changes intentionally break the public Rust API; they are
 not source-compatible with existing 0.4 patch consumers. `Store::open_at` now
@@ -23,8 +23,40 @@ entry point used by the GUI. Command contexts without the storage capability
 refuse exports; do not restore a shadow unsafe legacy writer as a fallback.
 
 No version bump is made here. Select an appropriate API-breaking version only
-after qualification. Independent consumption from an actual packed artifact is
-**UNRUN; release HOLD** until that check and the remaining release gates pass.
+after qualification. Independent Windows MSVC consumption from an actual offline packed artifact
+passed storage save/reopen, clone ownership, and guarded export checks.
+Release remains **HOLD** until independent audit and the remaining release
+gates pass; this does not qualify GUI runtime, Unix, or power-loss durability.
+
+A consumer needs `favelists` (the unpacked crate path) and `serde_json = "1"`.
+The host supplies an existing executable base, a data directory, and an export
+path outside protected storage. Importing the library starts no GUI or workers;
+opening a `Store` creates storage directories and acquires ownership until its
+last clone is dropped. This example saves one list and exports it:
+
+```rust
+use favelists::{model::Category, store::Store};
+use serde_json::json;
+use std::path::Path;
+
+fn save_and_export(
+    data_dir: &Path,
+    executable_base: &Path,
+    export_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open_at(data_dir, executable_base)?;
+    let mut library = store.load_library()?;
+    let id = library.new_list("Favorites", Category::Movies, true);
+    store.save_library(&library)?;
+    store.dispatch(
+        &mut library,
+        None,
+        "export.text",
+        &json!({"list_id": id, "path": export_path}),
+    )?;
+    Ok(())
+}
+```
 
 ## What it does
 
