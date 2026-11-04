@@ -108,16 +108,19 @@ impl FaveApp {
                 ui.separator();
                 ui.heading("Data");
                 ui.label(
-                    egui::RichText::new(format!("Data folder: {}", self.store.data_dir.display()))
+                    egui::RichText::new(format!("Data folder: {}", self.store.data_dir_label()))
                         .small(),
                 );
                 if ui.button("Move data folder…").clicked() {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         match self.store.relocate(&self.base_dir, &dir) {
-                            Ok(()) => {
+                            Ok(outcome) => {
                                 self.cover_textures.clear();
+                                if let Some(warning) = &outcome.cleanup_warning {
+                                    self.storage_errors.push(warning.clone());
+                                }
                                 self.status =
-                                    format!("Data moved to {}.", self.store.data_dir.display());
+                                    outcome.cleanup_warning.unwrap_or_else(|| format!("Data moved to {}.", self.store.data_dir_label()));
                             }
                             Err(e) => {
                                 self.settings_ui.message =
@@ -128,7 +131,7 @@ impl FaveApp {
                 }
                 ui.label(
                     egui::RichText::new(
-                        "Moving is safe: everything in the data folder — your lists, covers, settings and drinks database — moves to the new folder, the old folder is removed, and the app keeps running from the new location. Nothing is left behind or lost.",
+                        "Your lists, covers, settings and drinks database are copied and verified before the new location becomes active. If old files cannot be cleaned up, the app reports them and keeps using the new location.",
                     )
                     .color(COL_MUTED)
                     .small(),
@@ -157,7 +160,7 @@ impl FaveApp {
                     self.settings_ui.message = "Backing up…".to_string();
                 }
                 let auto_backups =
-                    crate::auto_backup::list_auto_backups(&self.store.backups_dir());
+                    self.store.with_storage(|state| crate::auto_backup::list_auto_backups(&state.backups_dir()));
                 if auto_backups.is_empty() {
                     ui.label(
                         egui::RichText::new("No automatic backups yet.")
@@ -167,7 +170,7 @@ impl FaveApp {
                 } else {
                     // Newest first. Restoring goes through the
                     // existing merge import — nothing is replaced.
-                    let mut restore: Option<std::path::PathBuf> = None;
+                    let mut restore: Option<String> = None;
                     for (name, mtime) in auto_backups.iter().rev() {
                         ui.horizontal(|ui| {
                             ui.label(
@@ -181,7 +184,7 @@ impl FaveApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button("Restore").clicked() {
-                                        restore = Some(self.store.backups_dir().join(name));
+                                        restore = Some(name.clone());
                                     }
                                 },
                             );
@@ -190,7 +193,7 @@ impl FaveApp {
                     if let Some(path) = restore {
                         match self.dispatch(
                             "backup.import",
-                            serde_json::json!({"path": path.to_string_lossy().into_owned()}),
+                            serde_json::json!({"internal_backup": path}),
                         ) {
                             Ok(r) => {
                                 let count = |k: &str| r[k].as_u64().unwrap_or(0) as usize;

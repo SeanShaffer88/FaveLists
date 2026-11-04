@@ -146,6 +146,7 @@ pub struct CommandContext<'a> {
     pub library: &'a mut Library,
     pub covers_dir: &'a Path,
     pub history: Option<&'a mut History>,
+    storage: Option<&'a crate::store::StorageState>,
 }
 
 impl<'a> CommandContext<'a> {
@@ -154,6 +155,7 @@ impl<'a> CommandContext<'a> {
             library,
             covers_dir,
             history: None,
+            storage: None,
         }
     }
 
@@ -166,7 +168,23 @@ impl<'a> CommandContext<'a> {
             library,
             covers_dir,
             history: Some(history),
+            storage: None,
         }
+    }
+    pub(crate) fn attach_storage(&mut self, storage: &'a crate::store::StorageState) {
+        self.storage = Some(storage);
+    }
+
+    fn outputs(
+        &self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<crate::store::ValidatedOutputs<'_>, CommandError> {
+        self.storage
+            .ok_or_else(|| {
+                CommandError::bad_params("filesystem export requires a storage session")
+            })?
+            .validate_external_outputs(paths)
+            .map_err(CommandError::io)
     }
 }
 
@@ -1714,7 +1732,9 @@ fn cmd_export_text(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value
     let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
     let keys = export_field_keys(m, &list)?;
     let path = req_str(m, "path")?;
-    export_text::write_txt(&list, &keys, Path::new(path)).map_err(CommandError::io)?;
+    ctx.outputs(&[path.into()])?
+        .write(0, export_text::build_txt(&list, &keys))
+        .map_err(CommandError::io)?;
     Ok(json!({"path": path, "written": true}))
 }
 
@@ -1727,7 +1747,11 @@ fn cmd_export_markdown(
     let keys = export_field_keys(m, &list)?;
     let path = req_str(m, "path")?;
     let covers_dir = ctx.covers_dir.to_path_buf();
-    let written = export_text::write_md(&list, &keys, Path::new(path), &covers_dir)
+    let plan = export_text::MarkdownPlan::new(&list, Path::new(path), &covers_dir)
+        .map_err(CommandError::io)?;
+    let outputs = ctx.outputs(&plan.outputs)?;
+    let written = plan
+        .write(&list, &keys, &outputs)
         .map_err(CommandError::io)?;
     Ok(json!({"path": path, "written": true, "assets_written": written.len()}))
 }
@@ -1766,6 +1790,7 @@ fn cmd_export_image(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Valu
     let m = obj(params)?;
     let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
     let path = req_str(m, "path")?.to_string();
+    let outputs = ctx.outputs(&[path.clone().into()])?;
     let arrangement = parse_arrangement(
         &opt_str(m, "arrangement").unwrap_or_else(|| "uniform_grid".to_string()),
     )?;
@@ -1843,7 +1868,7 @@ fn cmd_export_image(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Valu
     let covers_ref: Vec<Option<&image::DynamicImage>> = images.iter().map(|o| o.as_ref()).collect();
     let img = render::render(&placements, &covers_ref, cw, ch, arrangement, fit);
     let bytes = render::encode(&img, format).map_err(CommandError::internal)?;
-    std::fs::write(&path, bytes).map_err(CommandError::io)?;
+    outputs.write(0, bytes).map_err(CommandError::io)?;
     Ok(json!({
         "path": path,
         "written": true,
@@ -1891,7 +1916,11 @@ fn cmd_backup_export(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Val
     let scope = parse_scope(m)?;
     let path = req_str(m, "path")?;
     let covers_dir = ctx.covers_dir.to_path_buf();
-    let n = backup::export_backup(&*ctx.library, &scope, &covers_dir, Path::new(path))
+    let n = ctx
+        .outputs(&[path.into()])?
+        .with_file(0, |file| {
+            backup::encode_backup(ctx.library, &scope, &covers_dir, file)
+        })
         .map_err(CommandError::io)?;
     Ok(json!({"path": path, "lists_written": n}))
 }
@@ -1944,6 +1973,7 @@ fn cmd_export_share_card(
 ) -> Result<Value, CommandError> {
     let m = obj(params)?;
     let path = req_str(m, "path")?.to_string();
+    let outputs = ctx.outputs(&[path.clone().into()])?;
     // count: default 10, clamped to the card's 1-25 range.
     let count = match m.get("count") {
         None | Some(Value::Null) => 10,
@@ -2026,7 +2056,7 @@ fn cmd_export_share_card(
     })?;
     let bytes =
         render::encode(&rendered.image, ImageFormat::Png).map_err(CommandError::internal)?;
-    std::fs::write(&path, bytes).map_err(CommandError::io)?;
+    outputs.write(0, bytes).map_err(CommandError::io)?;
     Ok(json!({
         "path": path,
         "written": true,
@@ -2109,7 +2139,10 @@ fn cmd_export_csv(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Value,
     let m = obj(params)?;
     let list = list_ref(ctx, req_u64(m, "list_id")?)?.clone();
     let path = req_str(m, "path")?;
-    let rows = export_data::write_list_csv(&list, Path::new(path)).map_err(CommandError::io)?;
+    ctx.outputs(&[path.into()])?
+        .write(0, export_data::list_csv(&list))
+        .map_err(CommandError::io)?;
+    let rows = list.items.len();
     Ok(json!({"path": path, "written": true, "rows": rows}))
 }
 
@@ -2117,16 +2150,20 @@ fn cmd_export_library(ctx: &mut CommandContext<'_>, params: &Value) -> Result<Va
     let m = obj(params)?;
     let format = req_str(m, "format")?;
     let path = req_str(m, "path")?;
-    let (lists, items) = match format {
-        "csv" => export_data::write_library_csv(ctx.library, Path::new(path)),
-        "json" => export_data::write_library_json(ctx.library, Path::new(path)),
+    let text = match format {
+        "csv" => export_data::library_csv(ctx.library),
+        "json" => serde_json::to_string_pretty(ctx.library)
+            .map_err(|e| CommandError::internal(e.to_string()))?,
         other => {
             return Err(CommandError::bad_params(format!(
                 "unknown format '{other}' (expected csv|json)"
             )))
         }
-    }
-    .map_err(CommandError::io)?;
+    };
+    ctx.outputs(&[path.into()])?
+        .write(0, text)
+        .map_err(CommandError::io)?;
+    let (lists, items) = (ctx.library.lists.len(), ctx.library.total_items());
     Ok(json!({
         "path": path,
         "written": true,

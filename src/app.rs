@@ -229,28 +229,45 @@ pub struct FaveApp {
     pending_add: bool,
     pub(crate) drag_source: Option<usize>,
     drinks_check_started: bool,
+    pub(crate) storage_errors: Vec<String>,
 }
 
 impl FaveApp {
-    pub fn new(base_dir: PathBuf) -> FaveApp {
-        let store = Store::open(&base_dir).unwrap_or_else(|_| {
-            Store::open_at(&base_dir.join(crate::store::DATA_DIR_NAME)).expect("create data folder")
-        });
+    pub fn new(base_dir: PathBuf) -> std::io::Result<FaveApp> {
+        let store = Store::open(&base_dir)?;
         // First-run detection (v0.3 #20): the wizard opens only when
         // the data folder holds no trace of a previous run — no
         // library file, no autosave journal, no settings file. A
         // journal alone still counts as an existing install (it is
         // the recovery copy of a real library). This is the signal
         // the wizard's startup rule keys on.
-        let fresh_start = !store.library_path().exists()
-            && !store.journal_path().exists()
-            && !store.settings_path().exists();
+        let fresh_start = store.with_storage(|state| {
+            !state.library_path().exists()
+                && !state.journal_path().exists()
+                && !state.settings_path().exists()
+        });
         // Journal-recovering load (#4): a corrupt/missing main library file
         // falls back to the autosave journal, and the user is told.
-        let load = store.load_library_recovering().unwrap_or_default();
+        let mut storage_errors = Vec::new();
+        let load = store.load_library_recovering().unwrap_or_else(|e| {
+            storage_errors.push(format!("Library is write protected: {e}"));
+            Default::default()
+        });
         let recovered = load.recovered_from_journal;
+        if let Some(error) = load.write_error {
+            storage_errors.push(error);
+        }
+        if recovered {
+            storage_errors.push("Recovered your library from the autosave journal; original damaged bytes were preserved when present.".to_string());
+        }
         let library = load.library;
-        let mut settings = store.load_settings().unwrap_or_default().sanitized();
+        let mut settings = store
+            .load_settings()
+            .unwrap_or_else(|e| {
+                storage_errors.push(format!("Settings are write protected: {e}"));
+                Default::default()
+            })
+            .sanitized();
         let mut wizard = crate::app_wizard::WizardState::default();
         if fresh_start {
             wizard.open = true;
@@ -259,11 +276,14 @@ impl FaveApp {
             // version set the flag nowhere): mark it done silently
             // so it never opens unasked, and save just that.
             settings.wizard_done = true;
-            let _ = store.save_settings(&settings);
+            if let Err(e) = store.save_settings(&settings) {
+                storage_errors.push(format!("Could not save settings: {e}"));
+            }
         }
-        let drinks = DrinksDb::load_effective(&store.data_dir);
+        let drinks = store.with_storage(|state| DrinksDb::load_effective(state.data_dir()));
         let (tx, rx) = channel();
-        FaveApp {
+        Ok(FaveApp {
+            storage_errors,
             base_dir,
             store,
             library,
@@ -331,7 +351,7 @@ impl FaveApp {
             pending_add: false,
             drag_source: None,
             drinks_check_started: false,
-        }
+        })
     }
 
     /// Startup appearance (v0.3 #14/#16), read by `main.rs` in the
@@ -348,9 +368,15 @@ impl FaveApp {
     pub(crate) fn persist(&mut self) {
         if let Err(e) = self.store.save_library(&self.library) {
             self.status = format!("Could not save library: {e}");
+            if !self.storage_errors.contains(&self.status) {
+                self.storage_errors.push(self.status.clone());
+            }
         }
         if let Err(e) = self.store.save_settings(&self.settings) {
             self.status = format!("Could not save settings: {e}");
+            if !self.storage_errors.contains(&self.status) {
+                self.storage_errors.push(self.status.clone());
+            }
         }
     }
 
@@ -363,13 +389,33 @@ impl FaveApp {
         name: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, crate::commands::CommandError> {
-        let covers = self.store.covers_dir();
-        let mut ctx = crate::commands::CommandContext::with_history(
-            &mut self.library,
-            &covers,
-            &mut self.history,
-        );
-        crate::commands::dispatch(&mut ctx, name, &params)
+        let session = self.store.clone();
+        session.with_storage(|state| {
+            state
+                .require_library_writable()
+                .map_err(|e| crate::commands::CommandError {
+                    code: "io",
+                    message: e.to_string(),
+                })?;
+            let mut params = params;
+            if let Some(name) = params
+                .get("internal_backup")
+                .and_then(serde_json::Value::as_str)
+            {
+                let path = state
+                    .internal_backup_path(name)
+                    .map_err(crate::commands::CommandError::io)?;
+                params = serde_json::json!({"path": path});
+            }
+            let covers = state.covers_dir();
+            let mut ctx = crate::commands::CommandContext::with_history(
+                &mut self.library,
+                &covers,
+                &mut self.history,
+            );
+            ctx.attach_storage(state);
+            crate::commands::dispatch(&mut ctx, name, &params)
+        })
     }
 
     fn selected_list_ref(&self) -> Option<&FavList> {
@@ -386,8 +432,10 @@ impl FaveApp {
         if let Some(t) = self.cover_textures.get(cover) {
             return Some(t.clone());
         }
-        let path = self.store.covers_dir().join(cover);
-        let img = image::open(&path).ok()?;
+        let img = self
+            .store
+            .with_storage(|state| image::open(state.covers_dir().join(cover)))
+            .ok()?;
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
         let color =
@@ -507,8 +555,13 @@ impl FaveApp {
                     match result {
                         Ok(pack_json) => {
                             if let Ok(pack) = serde_json::from_str::<DrinksDb>(&pack_json) {
-                                let path = self.store.drinks_path();
-                                if crate::store::save_json_atomic(&path, &pack).is_ok() {
+                                if self
+                                    .store
+                                    .with_storage(|state| {
+                                        crate::store::save_json_atomic(&state.drinks_path(), &pack)
+                                    })
+                                    .is_ok()
+                                {
                                     self.drinks = pack;
                                     self.status = format!(
                                         "Drinks database updated ({} entries).",
@@ -559,8 +612,9 @@ impl FaveApp {
         if !self.settings.auto_backups {
             return;
         }
-        let dir = self.store.backups_dir();
-        let newest = crate::auto_backup::newest_auto_backup_time(&dir);
+        let newest = self.store.with_storage(|state| {
+            crate::auto_backup::newest_auto_backup_time(&state.backups_dir())
+        });
         if crate::auto_backup::is_due(crate::model::now_unix(), newest) {
             self.spawn_backup(false);
         }
@@ -572,10 +626,14 @@ impl FaveApp {
     pub(crate) fn spawn_backup(&mut self, manual: bool) {
         let tx = self.tx.clone();
         let library = self.library.clone();
-        let covers = self.store.covers_dir();
-        let dir = self.store.backups_dir();
+        let session = self.store.clone();
         std::thread::spawn(move || {
-            let result = crate::auto_backup::write_auto_backup(&library, &covers, &dir);
+            let result = session.with_storage(|state| {
+                state
+                    .require_library_writable()
+                    .map_err(|e| e.to_string())?;
+                crate::auto_backup::write_auto_backup(&library, state)
+            });
             let _ = tx.send(BgMsg::AutoBackup { manual, result });
         });
     }
@@ -852,6 +910,9 @@ impl eframe::App for FaveApp {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                for error in &self.storage_errors {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
                 ui.label(egui::RichText::new(&self.status).color(COL_MUTED));
                 // Update check (v0.3 #18): once a newer release is
                 // known, a quiet link sits next to the status text.
@@ -867,7 +928,7 @@ impl eframe::App for FaveApp {
                             "{} lists · {} items · data: {}",
                             self.library.lists.len(),
                             self.library.total_items(),
-                            self.store.data_dir.display()
+                            self.store.data_dir_label()
                         ))
                         .color(COL_MUTED)
                         .small(),
@@ -1928,8 +1989,11 @@ impl FaveApp {
             .unwrap_or("jpg")
             .to_lowercase();
         let name = format!("cover-{item_id}.{ext}");
-        let dest = self.store.covers_dir().join(&name);
-        match std::fs::copy(path, &dest) {
+        let result = self.store.with_storage(|state| {
+            state.require_library_writable()?;
+            std::fs::copy(path, state.covers_dir().join(&name))
+        });
+        match result {
             Ok(_) => {
                 let _ = self.dispatch(
                     "item.edit",
@@ -2408,8 +2472,10 @@ impl FaveApp {
     fn cover_aspect(&self, list: &FavList, idx: usize) -> f32 {
         let item = &list.items[idx];
         if let Some(cover) = &item.cover {
-            let path = self.store.covers_dir().join(cover);
-            if let Ok(img) = image::open(&path) {
+            if let Ok(img) = self
+                .store
+                .with_storage(|state| image::open(state.covers_dir().join(cover)))
+            {
                 let (w, h) = image::GenericImageView::dimensions(&img);
                 if h > 0 {
                     return w as f32 / h as f32;

@@ -11,6 +11,21 @@ only of the covers/posters — pick from lots of arrangements, shuffle the
 covers around in a preview until it looks right, and share the image anywhere.
 Everything is stored on your own PC, in a folder next to the program.
 
+## Library consumer migration (pending qualification)
+
+The storage-safety changes intentionally break the public Rust API; they are
+not source-compatible with existing 0.4 patch consumers. `Store::open_at` now
+takes `(data_dir, executable_base)` and canonicalizes the existing executable
+base so exports can protect its location pointer. Storage paths are private,
+and unrestricted export writers have been removed. Route exports through
+`Store::dispatch(&mut library, history, command, &params)`, the same guarded
+entry point used by the GUI. Command contexts without the storage capability
+refuse exports; do not restore a shadow unsafe legacy writer as a fallback.
+
+No version bump is made here. Select an appropriate API-breaking version only
+after qualification. Independent consumption from an actual packed artifact is
+**UNRUN; release HOLD** until that check and the remaining release gates pass.
+
 ## What it does
 
 - **11 list types, one type per list.** A movie list holds only movies, an

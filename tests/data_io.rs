@@ -21,6 +21,11 @@ fn dispatch(
     name: &str,
     params: Value,
 ) -> Result<Value, commands::CommandError> {
+    if name.starts_with("export.") || name == "backup.export" {
+        let base = covers.parent().unwrap();
+        let store = favelists::store::Store::open_at(base, base).unwrap();
+        return store.dispatch(lib, None, name, &params);
+    }
     let mut ctx = CommandContext::new(lib, covers);
     commands::dispatch(&mut ctx, name, &params)
 }
@@ -110,6 +115,7 @@ fn export_csv_exact_bytes_with_quoting() {
 
     let bytes = fs::read(&path).unwrap();
     assert_eq!(bytes, expected_movies_csv().as_bytes());
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 fn expected_movies_csv() -> String {
@@ -141,7 +147,7 @@ fn export_library_json_round_trips_to_an_equal_library() {
     )
     .unwrap();
 
-    let path = dir.join("library.json");
+    let path = dir.join("export-library.json");
     let r = dispatch(
         &mut lib,
         &covers,
@@ -155,6 +161,7 @@ fn export_library_json_round_trips_to_an_equal_library() {
     let text = fs::read_to_string(&path).unwrap();
     let back: Library = serde_json::from_str(&text).unwrap();
     assert_eq!(back, lib);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -209,6 +216,7 @@ fn export_library_csv_headers_and_rows() {
     assert_eq!(cells[2], "Cola");
     assert_eq!(cells[8], "FizzCo");
     assert_eq!(cells[9], "Cola");
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -253,6 +261,7 @@ fn export_errors() {
     assert!(!commands::is_mutating("export.csv"));
     assert!(!commands::is_mutating("export.library"));
     assert!(commands::is_mutating("import.paste"));
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------- #7 paste
@@ -298,6 +307,7 @@ fn paste_adds_skips_and_counts() {
     assert_eq!(dune.provider_id.as_deref(), Some("438631"));
     assert_eq!(dune.source, "tmdb");
     assert_eq!(dune.field("year"), Some("2021"));
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -329,6 +339,7 @@ fn paste_into_a_new_list_and_one_undo_step() {
     dispatch_h(&mut lib, &covers, &mut history, "history.redo", json!({})).unwrap();
     assert_eq!(lib.lists.len(), 1);
     assert_eq!(lib.lists[0].items.len(), 2);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -370,6 +381,7 @@ fn paste_errors() {
     .unwrap_err();
     assert_eq!(e.code, "bad_params");
     assert!(lib.lists.is_empty(), "a rejected paste changes nothing");
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------- #8 fuzzy
@@ -391,6 +403,7 @@ fn fuzzy_part_ii_groups_with_part_2_as_a_title_match() {
     assert_eq!(groups[0]["match_kind"], "title");
     assert_eq!(groups[0]["confidence"], "exact");
     assert_eq!(groups[0]["copies"].as_array().unwrap().len(), 2);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -411,6 +424,7 @@ fn fuzzy_directors_cut_variant_groups_as_a_title_match() {
     assert_eq!(groups.as_array().unwrap().len(), 1);
     assert_eq!(groups[0]["match_kind"], "title");
     assert_eq!(groups[0]["confidence"], "exact");
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -444,6 +458,7 @@ fn fuzzy_typo_pair_groups_as_similar_possible_and_merges() {
     .unwrap();
     assert_eq!(r["removed"].as_array().unwrap().len(), 1);
     assert_eq!(lib.list(list).unwrap().items.len(), 1);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -460,6 +475,7 @@ fn fuzzy_sequels_never_group() {
     add(&mut lib, &covers, list, "Dune 2", "2021");
     let groups = find_groups(&mut lib, &covers);
     assert!(groups.as_array().unwrap().is_empty(), "groups: {groups}");
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -486,4 +502,5 @@ fn fuzzy_year_rules() {
         .collect();
     years.sort_unstable();
     assert_eq!(years, ["1972", "1973"]);
+    fs::remove_dir_all(&dir).unwrap();
 }

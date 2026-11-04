@@ -127,7 +127,7 @@ fn undo_add_restores_exact_prior_state() {
     // Exact: item gone AND the item-id counter rolled back.
     assert_eq!(lib, before_add);
     assert_eq!(lib.next_item_id, before_add.next_item_id);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn undo_delete_list_restores_it_fully() {
     assert_eq!(r["command"], "list.delete");
     assert_eq!(lib, before_delete);
     assert_eq!(lib.list(1).unwrap().items.len(), 3);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn undo_set_rank_restores_order_and_redo_reapplies() {
     assert_eq!(r["redone"], true);
     assert_eq!(r["command"], "item.set_rank");
     assert_eq!(lib, after_rank);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn new_mutation_clears_the_redo_stack() {
         .map(|i| i.title.as_str())
         .collect();
     assert_eq!(titles, ["Alien", "Arrival", "Dune"]);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn undo_on_empty_history_is_a_clean_no_op() {
     let r = dispatch(&mut lib, &covers, "history.undo", json!({})).unwrap();
     assert_eq!(r["undone"], false);
     assert!(lib.lists.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn history_cap_is_respected() {
     assert_eq!(lib.list(1).unwrap().items.len(), 4);
     assert_eq!(lib.next_item_id, 5);
     assert_eq!(lib.next_list_id, 2);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -328,11 +328,21 @@ fn channel_undo_redo_session_persists() {
     let store = Store::open(&base).unwrap();
     let lib = store.load_library().unwrap();
     assert_eq!(lib.total_items(), 1);
-    assert!(store.journal_path().exists());
-    let journal: Library =
-        serde_json::from_str(&fs::read_to_string(store.journal_path()).unwrap()).unwrap();
+    assert!(base
+        .join(favelists::store::DATA_DIR_NAME)
+        .join("library.journal.json")
+        .exists());
+    let journal: Library = serde_json::from_str(
+        &fs::read_to_string(
+            base.join(favelists::store::DATA_DIR_NAME)
+                .join("library.journal.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(journal, lib);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -355,15 +365,23 @@ fn journal_is_written_on_save_and_matches() {
     let store = Store::open(&dir).unwrap();
     let lib = sample_library();
     store.save_library(&lib).unwrap();
-    assert!(store.journal_path().exists());
-    let journal_text = fs::read_to_string(store.journal_path()).unwrap();
+    assert!(dir
+        .join(favelists::store::DATA_DIR_NAME)
+        .join("library.journal.json")
+        .exists());
+    let journal_text = fs::read_to_string(
+        dir.join(favelists::store::DATA_DIR_NAME)
+            .join("library.journal.json"),
+    )
+    .unwrap();
     let journal: Library = serde_json::from_str(&journal_text).unwrap();
     assert_eq!(journal, lib);
     // A normal load does not flag recovery.
     let load = store.load_library_recovering().unwrap();
     assert!(!load.recovered_from_journal);
     assert_eq!(load.library, lib);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -372,11 +390,17 @@ fn journal_recovers_when_main_is_corrupt() {
     let store = Store::open(&dir).unwrap();
     let lib = sample_library();
     store.save_library(&lib).unwrap();
-    fs::write(store.library_path(), b"{ this is not json").unwrap();
+    fs::write(
+        dir.join(favelists::store::DATA_DIR_NAME)
+            .join("library.json"),
+        b"{ this is not json",
+    )
+    .unwrap();
     let load = store.load_library_recovering().unwrap();
     assert!(load.recovered_from_journal);
     assert_eq!(load.library, lib);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -385,11 +409,16 @@ fn journal_recovers_when_main_is_missing() {
     let store = Store::open(&dir).unwrap();
     let lib = sample_library();
     store.save_library(&lib).unwrap();
-    fs::remove_file(store.library_path()).unwrap();
+    fs::remove_file(
+        dir.join(favelists::store::DATA_DIR_NAME)
+            .join("library.json"),
+    )
+    .unwrap();
     let load = store.load_library_recovering().unwrap();
     assert!(load.recovered_from_journal);
     assert_eq!(load.library, lib);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -402,11 +431,17 @@ fn valid_main_wins_over_a_stale_journal() {
     newer.new_list("Sodas", favelists::model::Category::Sodas, false);
     // Write ONLY the main file (bypassing save_library), so the journal
     // stays stale: the parseable main file must still win, unflagged.
-    save_json_atomic(&store.library_path(), &newer).unwrap();
+    save_json_atomic(
+        &dir.join(favelists::store::DATA_DIR_NAME)
+            .join("library.json"),
+        &newer,
+    )
+    .unwrap();
     let load = store.load_library_recovering().unwrap();
     assert!(!load.recovered_from_journal);
     assert_eq!(load.library, newer);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -417,9 +452,15 @@ fn fresh_store_loads_default_without_recovery_flag() {
     assert!(!load.recovered_from_journal);
     assert_eq!(load.library, Library::default());
     // And a corrupt main with NO journal is still an honest error.
-    fs::write(store.library_path(), b"nope").unwrap();
+    fs::write(
+        dir.join(favelists::store::DATA_DIR_NAME)
+            .join("library.json"),
+        b"nope",
+    )
+    .unwrap();
     assert!(store.load_library_recovering().is_err());
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +502,7 @@ fn search_corpus_fixture_cases() {
             .collect();
         assert_eq!(titles, expected, "params: {:?}", case["params"]);
     }
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -497,7 +538,7 @@ fn search_result_shape_and_filter_param_validation() {
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -581,5 +622,5 @@ fn filtered_search_channel_matches_registry() {
         .map(|m| m["title"].as_str().unwrap())
         .collect();
     assert_eq!(titles, ["Dune"]);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }

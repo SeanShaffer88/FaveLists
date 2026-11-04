@@ -133,7 +133,7 @@ fn trash_remove_list_restore_round_trip() {
     // Restored at the END, with every personal field intact.
     assert_eq!(items[0].id, other);
     assert_eq!(&items[1], &before);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn bulk_remove_trashes_in_one_undo_step() {
     dispatch_h(&mut lib, &covers, &mut history, "history.undo", json!({})).unwrap();
     assert_eq!(lib.list(list).unwrap().items.len(), 3);
     assert!(lib.trash.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn restore_after_original_list_deleted() {
     assert_eq!(r["restored_to"], safe);
     assert_eq!(lib.list(safe).unwrap().items.len(), 1);
     assert!(lib.trash.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn restore_conflict_is_bad_params_without_mutation() {
     assert_eq!(e.code, "bad_params");
     assert!(e.message.contains("already in that list"), "{}", e.message);
     assert_eq!(lib, before);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn trash_remove_and_empty() {
     assert!(lib.trash.is_empty());
     let r = dispatch(&mut lib, &covers, "trash.empty", json!({})).unwrap();
     assert_eq!(r["removed"], 0);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn trash_unknown_ids_are_not_found() {
         assert_eq!(e.code, "not_found", "{name}: {e}");
     }
     assert_eq!(lib.trash.len(), 1);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -445,7 +445,7 @@ fn settings_new_flags_default_and_round_trip() {
 
     // And the flags persist through the store.
     let dir = temp_dir("settings-flags");
-    let store = Store::open_at(&dir).unwrap();
+    let store = Store::open_at(&dir, &dir).unwrap();
     let settings = Settings {
         auto_backups: false,
         wizard_done: true,
@@ -454,5 +454,6 @@ fn settings_new_flags_default_and_round_trip() {
     store.save_settings(&settings).unwrap();
     let loaded = store.load_settings().unwrap();
     assert_eq!(loaded, settings);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }

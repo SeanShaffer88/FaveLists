@@ -38,6 +38,11 @@ fn dispatch(
     name: &str,
     params: Value,
 ) -> Result<Value, commands::CommandError> {
+    if name.starts_with("export.") || name == "backup.export" {
+        let base = covers.parent().unwrap();
+        let store = favelists::store::Store::open_at(base, base).unwrap();
+        return store.dispatch(lib, None, name, &params);
+    }
     let mut ctx = CommandContext::new(lib, covers);
     commands::dispatch(&mut ctx, name, &params)
 }
@@ -128,7 +133,7 @@ fn view_items_orderings_ties_and_cross_list_mixing() {
     let needs = views::view_items(&lib, SmartView::NeedsRating);
     assert_eq!(entry_ids(&needs), vec![8, 7, 6, 4]);
     assert!(needs.iter().all(|e| e.item.rating.is_none()));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +214,7 @@ fn library_view_shape_limit_clamping_and_errors() {
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +267,7 @@ fn pick_is_deterministic_for_a_fixed_seed_in_every_scope() {
             );
         }
     }
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -308,7 +313,7 @@ fn pick_empty_scopes_return_null_entry() {
     )
     .unwrap();
     assert_eq!(r["entry"], Value::Null);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -333,7 +338,7 @@ fn pick_rejects_multiple_scopes_and_bad_references() {
     let err = dispatch(&mut lib, &covers, "library.pick", json!({"list_id": 999})).unwrap_err();
     assert_eq!(err.code, "not_found");
     assert_eq!(lib, before, "rejected picks mutate nothing");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -372,7 +377,7 @@ fn view_and_pick_record_no_history() {
     assert_eq!(history.undo_len(), 1);
     run(&mut lib, &mut history, "library.pick", json!({"seed": 3})).unwrap();
     assert_eq!(history.undo_len(), 1);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -396,7 +401,7 @@ fn pick_result_parses_back_into_a_view_entry() {
     assert_eq!(entry.item.title, r["entry"]["title"].as_str().unwrap());
     // And the null entry parses to None (the GUI's empty-scope path).
     assert_eq!(views::entry_from_json(&Value::Null), None);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +431,7 @@ fn share_card_view_path_renders_view_order_under_view_name() {
         // No font: the same clean io error as the list path.
         let err = dispatch(&mut lib, &covers, "export.share_card", params).unwrap_err();
         assert_eq!(err.code, "io");
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
         return;
     }
     let r = dispatch(&mut lib, &covers, "export.share_card", params).unwrap();
@@ -451,7 +456,7 @@ fn share_card_view_path_renders_view_order_under_view_name() {
     .unwrap();
     assert_eq!(r["entries"], 2);
     assert_eq!(r["missing_indices"], json!([0, 1]));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -512,7 +517,7 @@ fn share_card_rejects_list_and_view_together_neither_and_empty_view() {
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -535,5 +540,5 @@ fn share_card_list_path_reports_the_list_name_as_title() {
     .unwrap();
     assert_eq!(r["title"], "Films");
     assert_eq!(r["entries"], 4);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }

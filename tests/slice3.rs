@@ -157,7 +157,7 @@ fn bulk_remove_removes_present_ids_and_reports() {
     )
     .unwrap_err();
     assert_eq!(err.code, "not_found");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn bulk_move_preserves_ids_and_source_order_and_skips_duplicates() {
     assert_eq!(titles(&lib, 1), ["Alien", "Arrival"]);
     assert_eq!(titles(&lib, 2), ["Alien", "Heat", "Blade Runner", "Dune"]);
     assert_eq!(ids(&lib, 2), [5, 6, 3, 4]);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn bulk_move_same_list_is_a_clean_noop() {
     assert_eq!(r["skipped"], json!([]));
     assert_eq!(r["noop"], true);
     assert_eq!(lib, before);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn bulk_move_to_missing_list_errors_without_mutation() {
     assert_eq!(err.code, "not_found");
     assert_eq!(lib, before);
     assert_eq!(history.undo_len(), undo_before); // failed command: no undo step
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn bulk_copy_allocates_new_ids_and_shares_the_cover_reference() {
     .unwrap();
     assert_eq!(r["skipped"], json!([1]));
     assert_eq!(lib.list(1).unwrap().items.len(), 1);
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn bulk_action_is_exactly_one_undo_step() {
     let r = dispatch_h(&mut lib, &mut history, &covers, "history.undo", json!({})).unwrap();
     assert_eq!(r["command"], "items.bulk_move");
     assert_eq!(lib, before); // everything restored at once
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +370,7 @@ fn find_duplicates_groups_with_confidence() {
         .iter()
         .all(|g| g["copies"].as_array().unwrap().len() == 2));
     assert!(groups.iter().all(|g| g["category"] == "movies"));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn duplicates_corpus_fixture() {
             .collect();
         assert_eq!(got_ids, want_ids, "group {}", exp["key"]);
     }
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +491,7 @@ fn merge_adopts_missing_fields_cover_and_provider() {
     assert_eq!(kept.provider_id.as_deref(), Some("42"));
     assert_eq!(kept.source, "tmdb");
     assert!(lib.list(2).unwrap().items.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -542,7 +542,7 @@ fn merge_never_overwrites_kept_fields() {
     let kept = lib.list(1).unwrap().item(1).unwrap();
     assert_eq!(kept.field("genre"), Some("Comedy")); // kept wins
     assert_eq!(kept.field("director"), Some("D")); // missing one adopted
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -602,7 +602,7 @@ fn merge_invalid_inputs_error_without_mutation() {
             "failed merge recorded history"
         );
     }
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -629,7 +629,7 @@ fn merge_is_one_undo_step() {
     let r = dispatch_h(&mut lib, &mut history, &covers, "history.undo", json!({})).unwrap();
     assert_eq!(r["command"], "library.merge_duplicates");
     assert_eq!(lib, before); // dropped copy back, kept copy sparse again
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -732,7 +732,8 @@ fn bulk_move_channel_matches_registry() {
     let persisted = store.load_library().unwrap();
     assert_eq!(titles(&persisted, 2), ["Alien", "Arrival"]);
     assert!(persisted.list(1).unwrap().items.is_empty());
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -807,5 +808,6 @@ fn merge_channel_matches_registry() {
     let kept = persisted.list(1).unwrap().item(1).unwrap();
     assert_eq!(kept.field("genre"), Some("Drama"));
     assert_eq!(kept.cover.as_deref(), Some("obscure.jpg"));
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }

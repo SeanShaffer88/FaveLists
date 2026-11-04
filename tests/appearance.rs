@@ -109,6 +109,7 @@ fn settings_round_trip_through_the_store_preserves_appearance() {
     };
     store.save_settings(&settings).unwrap();
 
+    drop(store);
     let store2 = Store::open(&base).unwrap();
     let loaded = store2.load_settings().unwrap().sanitized();
     assert_eq!(loaded.text_size, TextSize::ExtraLarge);
@@ -116,7 +117,8 @@ fn settings_round_trip_through_the_store_preserves_appearance() {
     assert!(loaded.rows_view);
     assert!(loaded.high_contrast);
     assert_eq!(loaded, settings);
-    let _ = std::fs::remove_dir_all(&base);
+    drop(store2);
+    std::fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]

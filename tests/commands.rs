@@ -36,6 +36,11 @@ fn dispatch(
     name: &str,
     params: Value,
 ) -> Result<Value, commands::CommandError> {
+    if name.starts_with("export.") || name == "backup.export" {
+        let base = covers.parent().unwrap();
+        let store = favelists::store::Store::open_at(base, base).unwrap();
+        return store.dispatch(lib, None, name, &params);
+    }
     let mut ctx = CommandContext::new(lib, covers);
     commands::dispatch(&mut ctx, name, &params)
 }
@@ -307,7 +312,7 @@ fn every_registered_command_dispatches_successfully() {
     dispatch(&mut lib, &covers, "list.delete", json!({"list_id": 2})).unwrap();
     assert_eq!(lib.lists.len(), 1);
 
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +395,7 @@ fn bad_params_and_missing_entities_error_cleanly() {
     assert_eq!(lib.lists[0].items.len(), 0);
     assert_eq!(lib.next_item_id, 1);
 
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -428,7 +433,7 @@ fn cover_bytes_round_trip_through_item_add() {
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_params");
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +507,7 @@ fn registry_dispatch_matches_direct_library_calls() {
     let direct = sample_via_direct_calls();
     let via_registry = sample_via_dispatch(&covers);
     assert_eq!(normalised(&direct), normalised(&via_registry));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -532,7 +537,8 @@ fn json_channel_matches_registry_path() {
     let store = Store::open(&base).unwrap();
     let via_channel = store.load_library().unwrap();
     assert_eq!(normalised(&via_registry), normalised(&via_channel));
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +594,8 @@ fn fixture_session_reproduces_expected_library() {
     )
     .unwrap();
     assert_eq!(normalised_value(&lib), expected);
-    let _ = fs::remove_dir_all(&dir);
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -613,5 +620,5 @@ fn fixture_bad_requests_produce_expected_error_codes() {
         ["unknown_command", "not_found", "bad_params", "bad_json"]
     );
     assert!(responses.iter().all(|r| r["ok"] == false));
-    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&dir).unwrap();
 }
